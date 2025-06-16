@@ -14,7 +14,7 @@ class DWAOptimizer:
         self.temp = temp
         self.window_size = window_size
         self.loss_history = [deque(maxlen=window_size) for _ in range(num_tasks)]
-        self.weights = [1.0 if i == 1 else 0.0 for i in range(num_tasks)]
+        self.weights = [1.0 if (i == 1 or i == 0) else 0.0 for i in range(num_tasks)]
 
     def update(self, losses):
         """Update task weights based on loss history"""

@@ -1,6 +1,8 @@
 import torch
 import numpy as np
 import os
+import glob
+import re
 from utils.trainer import FusionTrainer
 from utils.data_loader import DataLoader  # 使用之前创建的数据加载器
 
@@ -218,7 +220,7 @@ class TrainPipline:
 
         self.trainer.encoder_fusion.train()
 
-    def train_model(self,verbose=True):
+    def train_model(self, start_cycle=0, verbose=True):
         """训练模型"""
         print("\n=== 开始训练 ===")
 
@@ -254,7 +256,8 @@ class TrainPipline:
                 test_data_A=test_data_IMU,
                 test_data_B=test_data_DLC,
                 test_labels=test_labels,
-                verbose=verbose
+                verbose=verbose,
+                start_cycle=start_cycle
             )
 
             print("\n=== 训练完成 ===")
@@ -311,7 +314,12 @@ class TrainPipline:
             traceback.print_exc()
             return None
 
-    def run_full_pipeline(self, **trainer_kwargs):
+    def run_full_pipeline(self, resume=True, **trainer_kwargs):
+        """运行完整的训练流水线
+
+        Args:
+            resume (bool): Whether to resume from the latest checkpoint
+        """
         """运行完整的训练流水线"""
         print("🚀 开始完整训练流水线...")
         print(f"PyTorch版本: {torch.__version__}")
@@ -323,12 +331,26 @@ class TrainPipline:
 
             # 2. 初始化模型
             self.initialize_trainer(**trainer_kwargs)
+            if resume:
+                pattern = os.path.join(self.save_path, "encoder_*.pkl")
+                checkpoints = glob.glob(pattern)
+                max_cycle = -1
+                for ckpt in checkpoints:
+                    m = re.search(r"encoder_(\d+)\.pkl", os.path.basename(ckpt))
+                    if m:
+                        num = int(m.group(1))
+                        if num > max_cycle:
+                            max_cycle = num
+                if max_cycle >= 0:
+                    print(f"Resuming from checkpoint cycle {max_cycle}")
+                    self.trainer.load(max_cycle)
+                    start_cycle = max_cycle + 1
 
             # 3. 测试模型组件
             self.test_model_components()
 
             # 4. 训练模型
-            losses = self.train_model()
+            losses = self.train_model(start_cycle=start_cycle)
 
             if losses is None:
                 print("❌ 训练失败")

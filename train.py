@@ -2,8 +2,9 @@ import torch
 import numpy as np
 import os
 from utils.TrainPipline import TrainPipline
+import argparse
 
-def main():
+def main(resume=True):
     """主函数"""
     # 设置随机种子
     torch.manual_seed(42)
@@ -24,8 +25,8 @@ def main():
         data_path,
         save_path,
         session_name,
-        N_feat_IMU=35,
-        N_feat_DLC=20,
+        N_feat_IMU=29,
+        N_feat_DLC=36,
         num_classes=14,
         spilit_num=5,
         device='auto',
@@ -38,19 +39,20 @@ def main():
         'd_model': 128,
         'nhead': 4,
         'hidden_dim': 4,
-        'lr_encoder': 0.0001,
+        'lr_encoder': 0.001,
         'lr_classifier': 0.001,
         'batch_size': 128,
         'contrastive_epochs': 1,
-        'mlp_epochs': 5,
+        'mlp_epochs': 1,
         'save_path': save_path,
         'save_gap': 5,
-        'n_cycles': 100,
-        'n_stable': 40
+        'n_cycles': 500,
+        'n_stable': 150
     }
 
     # 运行完整流水线
     success = real_trainer.run_full_pipeline(
+        resume=resume,
         **trainer_params
     )
 
@@ -85,8 +87,12 @@ def main():
 
 if __name__ == "__main__":
     success = main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', action='store_true', default=True, help='resume training from last checkpoint')
+    args = parser.parse_args()
+    success = main(resume=args.resume)
 
     if success:
-        print("\n✨ 所有流程执行成功!")
+        print("\n所有流程执行成功!")
     else:
-        print("\n⚠️ 存在错误，请检查日志")
+        print("\n存在错误，请检查日志")

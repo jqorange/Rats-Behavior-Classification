@@ -185,8 +185,8 @@ class FusionTrainer:
             contrastive_losses.append(epoch_losses)
 
             if verbose:
-                print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.4f}, "
-                      f"Sup={epoch_losses['sup']:.4f}, Unsup={epoch_losses['unsup']:.4f}, "
+                print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, "
+                      f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, "
                       f"α1={alpha1:.3f}, α2={alpha2:.3f}")
 
             self.n_epochs += 1
@@ -332,7 +332,7 @@ class FusionTrainer:
         return mlp_losses, {'test_bce': avg_test_bce, 'test_smooth': avg_test_smooth}
 
     def fit(self, train_data_A, train_data_B,train_data_sup_A, train_data_sup_B, labels_sup,
-            test_data_A, test_data_B, test_labels, verbose=True):
+            test_data_A, test_data_B, test_labels, verbose=True, start_cycle: int = 0):
         """
         Train the fusion model with alternating phases
 
@@ -354,7 +354,7 @@ class FusionTrainer:
 
         all_losses = {'contrastive': [], 'mlp': [], 'test_performance': []}
         is_stable = False
-        for cycle in range(self.n_cycles):
+        for cycle in range(start_cycle, self.n_cycles):
             if cycle >= self.n_stable:
                 is_stable = True
 
@@ -476,8 +476,8 @@ class FusionTrainer:
     def load(self, num):
         """Load the trained models"""
         self.encoder_fusion.load_state_dict(
-            torch.load(f"{self.path_prefix}_encoder_{num}.pkl", map_location=self.device)
+            torch.load(f"./{self.path_prefix}/encoder_{num}.pkl", map_location=self.device)
         )
         self.classifier.load_state_dict(
-            torch.load(f"{self.path_prefix}_classifier_{num}.pkl", map_location=self.device)
+            torch.load(f"./{self.path_prefix}/classifier_{num}.pkl", map_location=self.device)
         )
