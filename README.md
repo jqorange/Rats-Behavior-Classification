@@ -1,18 +1,9 @@
+
 # Rats_Behavior_Classification
 
 This project classifies laboratory rat behaviors from multimodal inputs. It contains the full training pipeline, inference scripts and tools for visualizing latent-space embeddings.
 
 ![Latent space example](./figures/representation.png)
-
-## Dataset Overview
-
-The project uses two input modalities:
-
-* **IMU** – 29-dimensional inertial sensor features.
-* **DLC** – 36-dimensional body keypoints extracted by DeepLabCut.
-
-Each session contains unlabeled segments for contrastive learning and supervised segments with 14 frame-level labels stored under `sup_labels/`. See the [Data Format](#data-format) section below for the folder structure.
-
 
 ## Model Architecture
 
@@ -39,7 +30,16 @@ Run `train.py` from the project root with the desired arguments. Default values 
 ## Usage
 
 ### Environment Setup
-@@ -43,50 +53,80 @@ pip install plotly
+
+Create the environment and install dependencies:
+
+```bash
+conda create -n Behavior python=3.10
+conda activate Behavior
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+conda install cudatoolkit=11.8
+pip install plotly
+````
 
 ### Training
 
@@ -65,36 +65,6 @@ python inference.py --data_path <path_to_dataset> --sessions F3D5_outdoor F3D6_o
 python plot_embeddings.py --rep_dir representations --sessions F3D5_outdoor
 ```
 
-## Evaluation
-
-After generating session representations and training the MLP classifier, predictions for the labeled segments can be evaluated with `evaluate.py`:
-
-```bash
-python evaluate.py --rep_dir representations --label_path <path_to_labels> --model_path checkpoints_classifier/mlp_repr.pt
-```
-
-Results are saved under `predictions_segment_eval` and a summary log is written to `eval_log.txt`.
-
-## Training MLP on Representations
-
-You can train a standalone classifier on the saved representations:
-
-```bash
-python train_repr_mlp.py --rep_dir representations --label_path <path_to_labels> --model_dir checkpoints_classifier
-```
-
-This command creates `mlp_repr.pt` in the chosen directory.
-
-## Prediction on New Sessions
-
-Generate CSV probability files with the trained MLP using:
-
-```bash
-python predict_repr_mlp.py --rep_dir representations --model_path checkpoints_classifier/mlp_repr.pt
-```
-
-Outputs will be placed in the `predictions/` folder.
-
 ## Parameters
 
 * `N_feat_A` / `N_feat_B`: feature dimensions for IMU and DLC inputs.
@@ -119,3 +89,11 @@ sup_labels/
 ```
 
 Files are in `.npy` format. Names follow the pattern `samples_<session>.npy`, `sup_labels_<session>.npy`, etc., and the `session_names` list selects which sessions to use.
+
+## License
+
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+
+---
+
+Further details can be found in the code comments and the scripts' default arguments.
