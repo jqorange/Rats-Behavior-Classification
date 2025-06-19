@@ -21,13 +21,15 @@ class DataLoader:
         self.sup_IMU_path = os.path.join(base_path, "sup_IMU")
         self.sup_DLC_path = os.path.join(base_path, "sup_DLC")
         self.sup_label_path = os.path.join(base_path, "sup_labels")
+        self.mask_path = os.path.join(base_path, "masks")
 
         # 初始化数据字典
         self.train_IMU = {}
         self.train_DLC = {}
         self.train_labels = {}
-        self.train_sup_IMU = {}  # 从train_sup分离出的IMU数据
-        self.train_sup_DLC = {}  # 从train_sup分离出的DLC数据
+        self.train_sup_IMU = {}
+        self.train_sup_DLC = {}
+        self.train_masks = {}
 
     def load_original_data(self):
         """加载原始的IMU和DLC数据"""
@@ -43,7 +45,13 @@ class DataLoader:
                 dlc_file = os.path.join(self.dlc_path, f"samples_{session}.npy")
                 self.train_DLC[session] = np.load(dlc_file)
 
-                print(f"✓ {session}: IMU {self.train_IMU[session].shape}, DLC {self.train_DLC[session].shape}")
+                mask_file = os.path.join(self.mask_path, f"{session}_masks.npy")
+                self.train_masks[session] = np.load(mask_file)
+
+                print(
+                    f"✓ {session}: IMU {self.train_IMU[session].shape}, DLC {self.train_DLC[session].shape}, "
+                    f"Mask {self.train_masks[session].shape}"
+                )
 
             except FileNotFoundError as e:
                 print(f"✗ 文件未找到: {session} - {e}")
@@ -95,7 +103,8 @@ class DataLoader:
             'train_DLC': self.train_DLC,
             'train_labels': self.train_labels,
             'train_sup_IMU': self.train_sup_IMU,
-            'train_sup_DLC': self.train_sup_DLC
+             'train_sup_DLC': self.train_sup_DLC,
+            'train_masks': self.train_masks,
         }
         return summary
 
@@ -110,7 +119,8 @@ class DataLoader:
             'train_DLC': self.train_DLC.get(session_name, np.array([])),
             'train_labels': self.train_labels.get(session_name, np.array([])),
             'train_sup_IMU': self.train_sup_IMU.get(session_name, np.array([])),
-            'train_sup_DLC': self.train_sup_DLC.get(session_name, np.array([]))
+            'train_sup_DLC': self.train_sup_DLC.get(session_name, np.array([])),
+            'train_masks': self.train_masks.get(session_name, np.array([])),
         }
 
     def print_data_info(self):
@@ -139,4 +149,5 @@ class DataLoader:
             if session in self.train_sup_DLC:
                 print(f"  监督DLC数据: {self.train_sup_DLC[session].shape}")
 
-
+            if session in self.train_masks:
+                print(f"  Mask数据: {self.train_masks[session].shape}")

@@ -3,12 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 import numpy as np
+from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 from collections import deque
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import tqdm
-from models.losses import compute_contrastive_losses, compute_smoothness_loss
+from models.losses import (
+    compute_contrastive_losses,
+    CenterLoss,
+    PrototypeClusterLoss,
+    UncertaintyWeighting,
+)
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
-from models.dwa import DWAOptimizer
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
 from utils.tools import take_per_row
 class FusionTrainer:
@@ -28,9 +34,6 @@ class FusionTrainer:
             lr_classifier=0.001,
             batch_size=16,
             temporal_unit=0,
-            smooth_window=5,
-            dwa_temp=2.0,
-            dwa_window=5,
             contrastive_epochs=100,  # 对比学习的epoch数
             mlp_epochs=10,  # MLP训练的epoch数
             save_path=None,
@@ -52,16 +55,12 @@ class FusionTrainer:
             lr_classifier: Learning rate for classifier
             batch_size: Batch size
             temporal_unit: Minimum unit for temporal contrast
-            smooth_window: Window size for smoothness loss
-            dwa_temp: Temperature for DWA
-            dwa_window: Window size for DWA loss history
             contrastive_epochs: Number of epochs for contrastive learning phase
             mlp_epochs: Number of epochs for MLP training phase
         """
         self.device = device
         self.batch_size = batch_size
         self.temporal_unit = temporal_unit
-        self.smooth_window = smooth_window
         self.num_classes = num_classes
         self.contrastive_epochs = contrastive_epochs
         self.mlp_epochs = mlp_epochs
@@ -96,11 +95,13 @@ class FusionTrainer:
             lr=lr_classifier
         )
 
-        # DWA optimizer for loss weights
-        self.dwa = DWAOptimizer(num_tasks=2, temp=dwa_temp, window_size=dwa_window)
+
+        self.loss_weighter = UncertaintyWeighting(num_losses=4)
 
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
+        self.center_loss = CenterLoss(num_classes, d_model)
+        self.proto_loss = PrototypeClusterLoss(num_classes, d_model)
 
         self.n_epochs = 0
         self.n_iters = 0
@@ -122,9 +123,14 @@ class FusionTrainer:
             torch.from_numpy(train_data_A).float(),
             torch.from_numpy(train_data_B).float()
         )
+        # Class-aware sampling for supervised data
+        label_counts = labels_sup.sum(axis=0) + 1e-6
+        label_freq = label_counts / label_counts.sum()
+        sample_weights = (labels_sup @ (1.0 / label_freq)).astype(np.float32)
+        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
         sup_loader = DataLoader(sup_ds,
                                 batch_size=min(self.batch_size, len(sup_ds)),
-                                shuffle=True,
+                                sampler=sampler,
                                 drop_last=True)
         unsup_loader = DataLoader(unsup_ds,
                                   batch_size=min(self.batch_size, len(unsup_ds)),
@@ -133,7 +139,7 @@ class FusionTrainer:
 
         contrastive_losses = []
         for epoch in range(self.contrastive_epochs):
-            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'total': 0.0}
+            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'center_l':0.0, 'proto_l':0.0, 'total': 0.0}
             n_batches = 0
             sup_iter = iter(sup_loader)
 
@@ -157,15 +163,14 @@ class FusionTrainer:
                 f_s = self.encoder_fusion(xA_s, xB_s)  # (B, T, D)
                 if is_stable:
                     # 计算两种对比损失
-                    sup_loss= compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s,is_supervised=True)
-                    unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u,is_supervised=False)
+                    sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
+                    unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                    center_l = self.center_loss(f_s, y_s)
+                    proto_l = self.proto_loss(f_u)
+                    loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
 
-                    alpha1, alpha2 = self.dwa.weights
-                    loss = alpha1 * sup_loss + alpha2 * unsup_loss
                 else:
                     unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                    sup_loss = torch.tensor(0., device=unsup_loss.device, dtype=unsup_loss.dtype)
-                    alpha1, alpha2 = self.dwa.weights
                     loss = unsup_loss
                 # 反向更新
                 self.optimizer_encoder.zero_grad()
@@ -173,9 +178,15 @@ class FusionTrainer:
                 self.optimizer_encoder.step()
 
                 # 记录
-                epoch_losses['sup'] += sup_loss.item()
-                epoch_losses['unsup'] += unsup_loss.item()
-                epoch_losses['total'] += loss.item()
+                if is_stable:
+                    epoch_losses['sup'] += sup_loss.item()
+                    epoch_losses['unsup'] += unsup_loss.item()
+                    epoch_losses['center_l'] += center_l.item()
+                    epoch_losses['proto_l'] += proto_l.item()
+                    epoch_losses['total'] += loss.item()
+                else:
+                    epoch_losses['unsup'] += unsup_loss.item()
+                    epoch_losses['total'] += loss.item()
                 n_batches += 1
                 self.n_iters += 1
 
@@ -185,10 +196,9 @@ class FusionTrainer:
             contrastive_losses.append(epoch_losses)
 
             if verbose:
-                print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, "
-                      f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, "
-                      f"α1={alpha1:.3f}, α2={alpha2:.3f}")
-
+                print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}")
+                if is_stable:
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f},Unsup={epoch_losses['center_l']:.8f},Unsup={epoch_losses['total']:.8f} ")
             self.n_epochs += 1
 
         return contrastive_losses
@@ -197,139 +207,115 @@ class FusionTrainer:
                         test_data_A, test_data_B, test_labels, verbose=True):
         """Train MLP phase and evaluate on test data for DWA update"""
 
-        # Create dataset for MLP training (same as contrastive data)
+        # Create dataset for MLP training
         mlp_dataset = TensorDataset(
             torch.from_numpy(train_data_A).float(),
             torch.from_numpy(train_data_B).float(),
             torch.from_numpy(train_labels).float()
         )
-        mlp_loader = DataLoader(
-            mlp_dataset,
-            batch_size=min(self.batch_size, len(mlp_dataset)),
-            shuffle=True,
-            drop_last=True
-        )
+        mlp_loader = DataLoader(mlp_dataset, batch_size=min(self.batch_size, len(mlp_dataset)),
+                                shuffle=True, drop_last=True)
 
-        # Create test dataset for evaluation
+        # Create test dataset
         test_dataset = TensorDataset(
             torch.from_numpy(test_data_A).float(),
             torch.from_numpy(test_data_B).float(),
             torch.from_numpy(test_labels).float()
         )
-        test_loader = DataLoader(
-            test_dataset,
-            batch_size=min(self.batch_size, len(test_dataset)),
-            shuffle=False,
-            drop_last=False
-        )
+        test_loader = DataLoader(test_dataset, batch_size=min(self.batch_size, len(test_dataset)),
+                                 shuffle=False, drop_last=False)
 
         mlp_losses = []
 
-        # Freeze encoder during MLP training
+        # Freeze encoder
         for param in self.encoder_fusion.parameters():
             param.requires_grad = False
 
         for epoch in range(self.mlp_epochs):
-            # Training phase
-            epoch_losses = {'bce': 0.0, 'smooth': 0.0, 'total': 0.0}
+            self.classifier.train()
+            epoch_losses = {'bce': 0.0, 'total': 0.0}
             n_batches = 0
 
-            self.classifier.train()
             for batch in tqdm.tqdm(mlp_loader, desc=f'MLP Epoch {epoch + 1}/{self.mlp_epochs}'):
-                xA, xB, y = batch
-                xA = xA.to(self.device)
-                xB = xB.to(self.device)
-                y = y.to(self.device)
+                xA, xB, y = [b.to(self.device) for b in batch]
 
-
-                # Forward pass through frozen encoder
                 with torch.no_grad():
-                    fused_repr = self.encoder_fusion(xA, xB)  # (B, T, D)
+                    fused_repr = self.encoder_fusion(xA, xB)
 
-                # Classification with MLP
                 predictions = self.classifier(fused_repr)  # (B, T, C)
 
-                # BCE loss
-                y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)  # (B, T, C)
+                y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)
                 bce_loss = self.bce_loss(predictions, y_expanded)
 
-                # Smoothness loss
-                smooth_loss = compute_smoothness_loss(self, predictions)
-
-                # Total MLP loss
-                mlp_loss = bce_loss + 0.1 * smooth_loss
-
-                # Backward pass - Classifier only
                 self.optimizer_classifier.zero_grad()
-                mlp_loss.backward()
+                bce_loss.backward()
                 self.optimizer_classifier.step()
 
-                # Logging
                 epoch_losses['bce'] += bce_loss.item()
-                try:
-                    epoch_losses['smooth'] += smooth_loss.item()
-                except:
-                    print('smooth', smooth_loss)
-                epoch_losses['total'] += mlp_loss.item()
+                epoch_losses['total'] += bce_loss.item()
                 n_batches += 1
 
-            # Average losses
             for key in epoch_losses:
                 epoch_losses[key] /= n_batches
 
             mlp_losses.append(epoch_losses)
-
-            if verbose:
-                print(f"MLP Epoch {epoch + 1}: Total={epoch_losses['total']:.4f}, "
-                      f"BCE={epoch_losses['bce']:.4f}, Smooth={epoch_losses['smooth']:.4f}")
-
             self.n_epochs += 1
 
-        # Evaluate on test set to get performance for DWA update
+            if verbose:
+                print(f"MLP Epoch {epoch + 1}: Total={epoch_losses['total']:.4f}, BCE={epoch_losses['bce']:.4f}")
+
+        # === Evaluation ===
         self.encoder_fusion.eval()
         self.classifier.eval()
 
+        all_preds = []
+        all_labels = []
+
         test_bce_losses = []
-        test_smooth_losses = []
 
         with torch.no_grad():
             for batch in test_loader:
-                xA, xB, y = batch
-                xA = xA.to(self.device)
-                xB = xB.to(self.device)
-                y = y.to(self.device)
+                xA, xB, y = [b.to(self.device) for b in batch]
 
-                # Forward pass
                 fused_repr = self.encoder_fusion(xA, xB)
                 predictions = self.classifier(fused_repr)
 
-                # Compute test losses
                 y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)
                 test_bce = self.bce_loss(predictions, y_expanded)
-                test_smooth = compute_smoothness_loss(self, predictions)
-
                 test_bce_losses.append(test_bce.item())
-                test_smooth_losses.append(test_smooth.item() if isinstance(test_smooth, torch.Tensor) else float(test_smooth))
 
+                # ==== For metrics ====
+                preds_np = (torch.sigmoid(predictions) > 0.5).cpu().numpy()  # binary predictions
+                labels_np = y_expanded.cpu().numpy()
 
-        # Average test performance
+                all_preds.append(preds_np)
+                all_labels.append(labels_np)
+
+        # Aggregate results
         avg_test_bce = np.mean(test_bce_losses)
-        avg_test_smooth = np.mean(test_smooth_losses)
+        y_pred_all = np.concatenate(all_preds, axis=0).reshape(-1, test_labels.shape[-1])
+        y_true_all = np.concatenate(all_labels, axis=0).reshape(-1, test_labels.shape[-1])
 
+        acc = accuracy_score(y_true_all, y_pred_all)
+        prec = precision_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+        rec = recall_score(y_true_all, y_pred_all, average='macro', zero_division=0)
+        f1 = f1_score(y_true_all, y_pred_all, average='macro', zero_division=0)
 
+        if verbose:
+            print(f"Test BCE: {avg_test_bce:.4f}")
+            print(f"Test Acc: {acc:.4f}, Prec: {prec:.4f}, Rec: {rec:.4f}, F1: {f1:.4f}")
 
-        # Unfreeze encoder after MLP training
+        # Unfreeze encoder
         for param in self.encoder_fusion.parameters():
             param.requires_grad = True
 
-        # Update DWA weights based on TEST performance
-        dwa_weights = self.dwa.update([avg_test_bce, avg_test_smooth])
-
-        if verbose:
-            print(f"Test Performance - BCE: {avg_test_bce:.4f}, Smooth: {avg_test_smooth:.4f}")
-            print(f"Updated DWA weights based on test performance: α1={dwa_weights[0]:.3f}, α2={dwa_weights[1]:.3f}")
-
-        return mlp_losses, {'test_bce': avg_test_bce, 'test_smooth': avg_test_smooth}
+        return mlp_losses, {
+            'test_bce': avg_test_bce,
+            'acc': acc,
+            'precision': prec,
+            'recall': rec,
+            'f1': f1
+        }
 
     def fit(self, train_data_A, train_data_B,train_data_sup_A, train_data_sup_B, labels_sup,
             test_data_A, test_data_B, test_labels, verbose=True, start_cycle: int = 0):

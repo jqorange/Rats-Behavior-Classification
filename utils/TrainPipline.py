@@ -177,9 +177,6 @@ class TrainPipline:
             'lr_classifier': 0.001,
             'batch_size': 32,
             'temporal_unit': 1,
-            'smooth_window': 5,
-            'dwa_temp': 2.0,
-            'dwa_window': 3,
             'contrastive_epochs': 50,
             'mlp_epochs': 100,
             'save_path': self.save_path,
@@ -345,6 +342,8 @@ class TrainPipline:
                     print(f"Resuming from checkpoint cycle {max_cycle}")
                     self.trainer.load(max_cycle)
                     start_cycle = max_cycle + 1
+            else:
+                start_cycle = 0
 
             # 3. 测试模型组件
             self.test_model_components()

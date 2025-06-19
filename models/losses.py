@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=0):
@@ -83,60 +84,6 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
 
     return loss
 
-def compute_smoothness_loss(self, predictions, min_duration=None):
-    """
-    Compute smoothness loss for temporal consistency
-    Penalize rapid label changes - labels should maintain same state for at least min_duration frames
-    predictions: (B, T, C) - logits
-    """
-    if min_duration is None:
-        min_duration = self.smooth_window  # Default to 5 frames
-
-    B, T, C = predictions.shape
-    if T < min_duration:
-        return torch.tensor(0.0, device=predictions.device)
-
-    # Convert logits to binary predictions (0.5 threshold after sigmoid)
-    probs = torch.sigmoid(predictions)  # (B, T, C)
-    binary_preds = (probs > 0.5).float()  # (B, T, C)
-
-    smooth_loss = 0.0
-
-    for b in range(B):
-        for c in range(C):
-            # Get binary predictions for this batch and class
-            seq = binary_preds[b, :, c]  # (T,)
-
-            # Find state changes
-            changes = torch.abs(seq[1:] - seq[:-1])  # (T-1,) - 1 where state changes
-            change_indices = torch.where(changes > 0)[0]  # Indices where changes occur
-
-            if len(change_indices) == 0:
-                continue  # No changes, perfect smoothness
-
-            # Add boundaries (start and end of sequence)
-            change_indices = torch.cat([
-                torch.tensor([-1], device=predictions.device),
-                change_indices,
-                torch.tensor([T - 1], device=predictions.device)
-            ])
-
-            # Compute durations of each state
-            durations = change_indices[1:] - change_indices[:-1]  # Duration of each state
-
-            # Penalize states that are too short (< min_duration)
-            short_states = durations < min_duration
-            if short_states.any():
-                # Penalty is inversely proportional to duration
-                # Shorter states get higher penalty
-                penalties = torch.clamp(min_duration - durations[short_states], min=0)
-                penalty = penalties.float().sum() / min_duration  # Normalize
-                smooth_loss += penalty
-
-    # Average over batch and classes
-    smooth_loss = smooth_loss / (B * C)
-
-    return smooth_loss
 
 def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=True):
     """Compute either supervised or unsupervised contrastive loss based on mode."""
@@ -184,3 +131,67 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
             )
 
         return unsup_loss  # Return sup_loss=0, unsup_loss
+class CenterLoss(nn.Module):
+    """Center loss that encourages features of the same class to cluster."""
+
+    def __init__(self, num_classes: int, feat_dim: int):
+        super().__init__()
+        self.centers = nn.Parameter(torch.randn(num_classes, feat_dim))
+
+    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute center loss.
+
+        Args:
+            features: (B, T, D) sequence features from the encoder.
+            labels:   (B, C) multi-hot labels for each sequence.
+        """
+        B, T, D = features.shape
+        features = features.reshape(B * T, D)
+        labels = labels.float().unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
+
+        # each feature may belong to multiple classes; average over assigned classes
+        mask = labels > 0
+        if mask.sum() == 0:
+            return features.new_tensor(0.0)
+
+        # === fix device mismatch ===
+        centers = self.centers.to(features.device).unsqueeze(0).expand(B * T, -1, -1)
+
+        diff = features.unsqueeze(1) - centers
+        dist = (diff.pow(2).sum(-1) + 1e-6).sqrt()
+        loss = (dist * mask).sum() / mask.sum()
+        return loss
+
+
+class PrototypeClusterLoss(nn.Module):
+    """Prototype driven cluster loss for unlabeled data."""
+
+    def __init__(self, num_prototypes: int, feat_dim: int):
+        super().__init__()
+        self.prototypes = nn.Parameter(torch.randn(num_prototypes, feat_dim))
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """Align features with closest prototypes."""
+        B, T, D = features.shape
+        feats = F.normalize(features.reshape(B * T, D), dim=-1)
+        protos = F.normalize(self.prototypes.to(features.device), dim=-1)  # 加这一行
+
+        sim = torch.matmul(feats, protos.t())  # (BT, P)
+        loss = -sim.max(dim=1)[0].mean()
+        return loss
+
+
+class UncertaintyWeighting(nn.Module):
+    """Learnable uncertainty-based weighting for multiple losses."""
+
+    def __init__(self, num_losses: int):
+        super().__init__()
+        self.log_vars = nn.Parameter(torch.zeros(num_losses))
+
+    def forward(self, losses: list) -> torch.Tensor:
+        assert len(losses) == len(self.log_vars)
+        weighted = []
+        for i, L in enumerate(losses):
+            precision = torch.exp(-self.log_vars[i])
+            weighted.append(precision * L + self.log_vars[i])
+        return sum(weighted)
