@@ -23,17 +23,13 @@ class EncoderFusion(nn.Module):
         )
 
         # Gate to modulate fusion with confidence
-        self.gate_mlp = nn.Sequential(
-            nn.Linear(d_model * 2 + 1, d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, 1)
-        )
+        self.gate = nn.Linear(d_model, 1)
 
         # LayerNorm for residual fusion
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, xA, xB, confidence=None):
+    def forward(self, xA, xB):
         """
         mask_type: 'binomial' or 'continuous'
         Returns two fused masked representations h1, h2
@@ -61,12 +57,7 @@ class EncoderFusion(nn.Module):
         )  # B×T×D
 
         # Gate + residual fusion for first pair
-        if confidence is None:
-            confidence = torch.ones(B, T, 1, device=hA.device)
-        else:
-            confidence = confidence.unsqueeze(-1)
-        gate_in = torch.cat([hA, hB, confidence], dim=-1)
-        g = torch.sigmoid(self.gate_mlp(gate_in))
+        g = torch.sigmoid(self.gate(hA))  # B×T×1
         h = hA + g * m  # B×T×D
         h = self.norm(h)
         h = self.dropout(h)
