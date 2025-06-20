@@ -47,7 +47,8 @@ def main(resume=False):
         'save_path': save_path,
         'save_gap': 5,
         'n_cycles': 2,
-        'n_stable': 1
+        'n_stable': 1,
+        'use_amp': True
     }
 
     # 运行完整流水线

@@ -182,7 +182,8 @@ class TrainPipline:
             'save_path': self.save_path,
             'save_gap': 3,
             'n_cycles': 10,
-            'n_stable': 2
+            'n_stable': 2,
+            'use_amp': False
         }
 
         # 更新参数

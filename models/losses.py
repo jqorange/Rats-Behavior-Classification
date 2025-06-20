@@ -3,7 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
-def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=0):
+def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0
     while z1.size(1) > 1:

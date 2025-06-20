@@ -39,7 +39,8 @@ class FusionTrainer:
             save_path=None,
             save_gap=5,
             n_cycles=1,
-            n_stable=1
+            n_stable=1,
+            use_amp=False
     ):
         """
         Args:
@@ -69,6 +70,10 @@ class FusionTrainer:
         self.n_cycles = n_cycles
         self.n_stable = n_stable
 
+        # AMP settings
+        self.use_amp = use_amp and torch.cuda.is_available()
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
         # Models
         self.encoder_fusion = EncoderFusion(
             N_feat_A=N_feat_A,
@@ -77,6 +82,8 @@ class FusionTrainer:
             d_model=d_model,
             nhead=nhead
         ).to(device)
+
+
 
         self.classifier = MLPClassifier(
             input_dim=d_model,
@@ -155,26 +162,30 @@ class FusionTrainer:
                 xA_u, xB_u = xA_u.to(self.device), xB_u.to(self.device)
                 xA_s, xB_s, y_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device)
 
+                # Forward pass with AMP
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    f_u = self.encoder_fusion(xA_u, xB_u)  # (B, T, D)
+                    f_s = self.encoder_fusion(xA_s, xB_s)  # (B, T, D)
+                    if is_stable:
+                        # 计算两种对比损失
+                        sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
+                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        center_l = self.center_loss(f_s, y_s)
+                        proto_l = self.proto_loss(f_u)
+                        loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
+                    else:
+                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        loss = unsup_loss
 
-
-                # 前向：融合编码
-                f_u = self.encoder_fusion(xA_u, xB_u)  # (B, T, D)
-                f_s = self.encoder_fusion(xA_s, xB_s)  # (B, T, D)
-                if is_stable:
-                    # 计算两种对比损失
-                    sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
-                    unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                    center_l = self.center_loss(f_s, y_s)
-                    proto_l = self.proto_loss(f_u)
-                    loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
-
-                else:
-                    unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                    loss = unsup_loss
                 # 反向更新
                 self.optimizer_encoder.zero_grad()
-                loss.backward()
-                self.optimizer_encoder.step()
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer_encoder)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    self.optimizer_encoder.step()
 
                 # 记录
                 if is_stable:
@@ -241,14 +252,19 @@ class FusionTrainer:
                 with torch.no_grad():
                     fused_repr = self.encoder_fusion(xA, xB)
 
-                predictions = self.classifier(fused_repr)  # (B, T, C)
-
-                y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)
-                bce_loss = self.bce_loss(predictions, y_expanded)
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    predictions = self.classifier(fused_repr)  # (B, T, C)
+                    y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)
+                    bce_loss = self.bce_loss(predictions, y_expanded)
 
                 self.optimizer_classifier.zero_grad()
-                bce_loss.backward()
-                self.optimizer_classifier.step()
+                if self.use_amp:
+                    self.scaler.scale(bce_loss).backward()
+                    self.scaler.step(self.optimizer_classifier)
+                    self.scaler.update()
+                else:
+                    bce_loss.backward()
+                    self.optimizer_classifier.step()
 
                 epoch_losses['bce'] += bce_loss.item()
                 epoch_losses['total'] += bce_loss.item()
@@ -276,8 +292,9 @@ class FusionTrainer:
             for batch in test_loader:
                 xA, xB, y = [b.to(self.device) for b in batch]
 
-                fused_repr = self.encoder_fusion(xA, xB)
-                predictions = self.classifier(fused_repr)
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    fused_repr = self.encoder_fusion(xA, xB)
+                    predictions = self.classifier(fused_repr)
 
                 y_expanded = y.unsqueeze(1).expand(-1, predictions.size(1), -1)
                 test_bce = self.bce_loss(predictions, y_expanded)
@@ -400,7 +417,8 @@ class FusionTrainer:
                 xA = xA.to(self.device)
                 xB = xB.to(self.device)
 
-                out = self.encoder_fusion(xA, xB)
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    out = self.encoder_fusion(xA, xB)
                 if pool:
                     # global max pooling
                     global_feat = out.max(dim=1).values
@@ -448,12 +466,13 @@ class FusionTrainer:
                 xA = xA.to(self.device)
                 xB = xB.to(self.device)
 
-                # Encode
-                fused_repr = self.encoder_fusion(xA, xB)
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    # Encode
+                    fused_repr = self.encoder_fusion(xA, xB)
 
-                # Classify
-                predictions = self.classifier(fused_repr)
-                predictions = torch.sigmoid(predictions)
+                    # Classify
+                    predictions = self.classifier(fused_repr)
+                    predictions = torch.sigmoid(predictions)
 
                 outputs.append(predictions.cpu())
 
