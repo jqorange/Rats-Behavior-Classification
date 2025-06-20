@@ -74,7 +74,6 @@ class FusionTrainer:
             N_feat_A=N_feat_A,
             N_feat_B=N_feat_B,
             mask_type=mask_type,
-            out_dim=None,  # Keep sequence representation
             d_model=d_model,
             nhead=nhead
         ).to(device)
@@ -370,7 +369,7 @@ class FusionTrainer:
 
         return all_losses
 
-    def encode(self, data_A, data_B, batch_size=None):
+    def encode(self, data_A, data_B, batch_size=None, pool=False):
         """
         Encode data using the trained fusion model
 
@@ -380,7 +379,8 @@ class FusionTrainer:
             batch_size: Batch size for inference
 
         Returns:
-            Fused representations: (N, T, D)
+            If pool is False: fused representations (N, T, D)
+            If pool is True:  pooled features (N, 2, D)
         """
         if batch_size is None:
             batch_size = self.batch_size
@@ -401,11 +401,20 @@ class FusionTrainer:
                 xB = xB.to(self.device)
 
                 out = self.encoder_fusion(xA, xB)
+                if pool:
+                    # global max pooling
+                    global_feat = out.max(dim=1).values
+                    center_start = out.size(1) // 2 - 2
+                    center_start = max(center_start, 0)
+                    center_end = min(center_start + 5, out.size(1))
+                    center_feat = out[:, center_start:center_end].max(dim=1).values
+                    out = torch.stack([center_feat, global_feat], dim=1)
                 outputs.append(out.cpu())
 
             output = torch.cat(outputs, dim=0)
 
         self.encoder_fusion.train()
+
         return output.numpy()
 
     def predict(self, data_A, data_B, batch_size=None):

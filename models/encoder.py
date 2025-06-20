@@ -12,11 +12,10 @@ class Encoder(nn.Module):
     - Optional global projection to a single vector of size out_dim via mean pooling
     Supports optional frame mask for Transformer
     """
-    def __init__(self, N_feat, d_model=64, depth=3, nhead=4, dropout=0.1, out_dim=None):
+    def __init__(self, N_feat, d_model=64, depth=3, nhead=4, dropout=0.1):
         super().__init__()
         # Model dimensions
         self.d_model = d_model
-        self.out_dim = out_dim
         # 1) Project input features to model dimension
         self.input_fc  = nn.Linear(N_feat, d_model)
         self.norm1     = nn.LayerNorm(d_model)
@@ -34,11 +33,8 @@ class Encoder(nn.Module):
         self.trans     = nn.TransformerEncoder(layer, num_layers=1)
         self.norm3     = nn.LayerNorm(d_model)
         self.dropout   = nn.Dropout(dropout)
-        # 4) Global projection: mean pooling + linear
-        if out_dim is not None:
-            self.global_proj = nn.Linear(d_model, out_dim)
-        else:
-            self.global_proj = None
+
+
 
     def forward(self, x, mask=None):
         """
@@ -69,10 +65,4 @@ class Encoder(nn.Module):
         h = self.trans(h)                   # (B, T, d_model)
         h = self.norm3(h)                   # (B, T, d_model)
 
-        # 4) Global mean pooling + projection
-        if self.global_proj is not None:
-            # mean over time: (B, T, d_model) -> (B, d_model)
-            h_pooled = h.mean(dim=1)
-            h_out    = self.global_proj(h_pooled)  # (B, out_dim)
-            return h_out
         return h  # (B, T, d_model)

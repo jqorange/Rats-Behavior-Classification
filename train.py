@@ -27,7 +27,7 @@ def main(resume=False):
         session_name,
         N_feat_IMU=29,
         N_feat_DLC=36,
-        num_classes=14,
+        num_classes=12,
         spilit_num=1,
         device='auto',
         max_samples_per_session=500  # 限制每个session最多5万个样本，根据内存情况调整

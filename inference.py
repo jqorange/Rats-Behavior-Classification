@@ -56,8 +56,7 @@ def main(args):
         imu = imu[:min_len].astype(np.float32)
         dlc = dlc[:min_len].astype(np.float32)
 
-        reps = trainer.encode(imu, dlc)
-        reps = reps.mean(axis=1)
+        reps = trainer.encode(imu, dlc, pool=True)
         out_file = os.path.join(args.output_dir, f"{session}_repr.npy")
         np.save(out_file, reps)
         print(f"Saved {out_file} with shape {reps.shape}")

@@ -7,12 +7,12 @@ from .masking import generate_continuous_mask, generate_binomial_mask  # mask fu
 
 class EncoderFusion(nn.Module):
 
-    def __init__(self, N_feat_A, N_feat_B, mask_type=None, out_dim=None, d_model=64, nhead=4, dropout=0.1):
+    def __init__(self, N_feat_A, N_feat_B, mask_type=None,d_model=64, nhead=4, dropout=0.1):
         super().__init__()
 
         # Single-modal encoders
-        self.encoderA = Encoder(N_feat_A, d_model=d_model, nhead=nhead, out_dim=out_dim)
-        self.encoderB = Encoder(N_feat_B, d_model=d_model, nhead=nhead, out_dim=out_dim)
+        self.encoderA = Encoder(N_feat_A, d_model=d_model, nhead=nhead)
+        self.encoderB = Encoder(N_feat_B, d_model=d_model, nhead=nhead)
         self.mask_type = mask_type
         # Cross-attention from A→B
         self.cross_attn = nn.MultiheadAttention(

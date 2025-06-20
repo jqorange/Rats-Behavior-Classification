@@ -70,7 +70,7 @@ class DataLoader:
 
                 # 加载监督标签
                 sup_label_file = os.path.join(self.sup_label_path, f"sup_labels_{session}.npy")
-                self.train_labels[session] = np.load(sup_label_file)
+                self.train_labels[session] = np.load(sup_label_file)[:, 0:12]
 
                 print(
                     f"✓ {session}: Sup_IMU {self.train_sup_IMU[session].shape}, Sup_DLC {self.train_sup_DLC[session].shape}, Labels {self.train_labels[session].shape}")
