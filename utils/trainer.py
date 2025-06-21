@@ -114,17 +114,35 @@ class FusionTrainer:
         self.n_epochs = 0
         self.n_iters = 0
 
+    def train_contrastive_phase(
+            self,
+            train_data_A,
+            train_data_B,
+            train_data_sup_A=None,
+            train_data_sup_B=None,
+            labels_sup=None,
+            verbose=True,
+            stage="unsup",
+            unsup_by_session=None,
+    ):
+        """Train contrastive phase for different stages.
 
-
-    def train_contrastive_phase(self,
-                                train_data_A, train_data_B,
-                                train_data_sup_A=None, train_data_sup_B=None, labels_sup=None,
-                                verbose=True, stage='unsup'):
-        """Train contrastive phase for different stages."""
+        Args:
+            train_data_A: concatenated unsupervised IMU data
+            train_data_B: concatenated unsupervised DLC data
+            train_data_sup_A: supervised IMU data
+            train_data_sup_B: supervised DLC data
+            labels_sup: supervised labels
+            verbose: print progress
+            stage: one of ``'unsup'``, ``'adapt'`` or ``'all'``
+            unsup_by_session: optional dict mapping session name to (imu, dlc)
+                arrays. When provided and ``stage=='adapt'`` the unsupervised
+                batches are drawn from a single session at a time.
+        """
 
         unsup_ds = TensorDataset(
             torch.from_numpy(train_data_A).float(),
-            torch.from_numpy(train_data_B).float()
+            torch.from_numpy(train_data_B).float(),
         )
 
         if stage != 'unsup':
@@ -144,20 +162,56 @@ class FusionTrainer:
         else:
             sup_loader = None
 
-        unsup_loader = DataLoader(unsup_ds,
-                                  batch_size=min(self.batch_size, len(unsup_ds)),
-                                  shuffle=True,
-                                  drop_last=True)
+        if stage == 'adapt' and unsup_by_session:
+            unsup_loaders = []
+            for imu, dlc in unsup_by_session.values():
+                ds = TensorDataset(
+                    torch.from_numpy(imu).float(),
+                    torch.from_numpy(dlc).float(),
+                )
+                loader = DataLoader(
+                    ds,
+                    batch_size=min(self.batch_size, len(ds)),
+                    shuffle=True,
+                    drop_last=True,
+                )
+                unsup_loaders.append(loader)
+            total_unsup_batches = sum(len(l) for l in unsup_loaders)
+        else:
+            unsup_loader = DataLoader(
+                unsup_ds,
+                batch_size=min(self.batch_size, len(unsup_ds)),
+                shuffle=True,
+                drop_last=True,
+            )
+            unsup_loaders = [unsup_loader]
+            total_unsup_batches = len(unsup_loader)
 
         contrastive_losses = []
         for epoch in range(self.contrastive_epochs):
-            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'center_l':0.0, 'proto_l':0.0, 'total': 0.0}
+            epoch_losses = {
+                'sup': 0.0,
+                'unsup': 0.0,
+                'center_l': 0.0,
+                'proto_l': 0.0,
+                'total': 0.0,
+            }
             n_batches = 0
             if sup_loader is not None:
                 sup_iter = iter(sup_loader)
 
-            for xA_u, xB_u in tqdm.tqdm(unsup_loader,
-                                        desc=f'Contrastive Epoch {epoch + 1}/{self.contrastive_epochs}'):
+            unsup_iters = [iter(l) for l in unsup_loaders]
+
+            for _ in tqdm.tqdm(
+                    range(total_unsup_batches),
+                    desc=f'Contrastive Epoch {epoch + 1}/{self.contrastive_epochs}',
+            ):
+                idx = np.random.randint(len(unsup_loaders))
+                try:
+                    xA_u, xB_u = next(unsup_iters[idx])
+                except StopIteration:
+                    unsup_iters[idx] = iter(unsup_loaders[idx])
+                    xA_u, xB_u = next(unsup_iters[idx])
                 if sup_loader is not None:
                     try:
                         xA_s, xB_s, y_s = next(sup_iter)
@@ -432,9 +486,8 @@ class FusionTrainer:
                 print(f"\n=== Epoch {epoch + 1}/{self.n_all} ===")
 
             if epoch < self.n_stable:
-                for module in [self.encoder_fusion.encoderA.adapter, self.encoder_fusion.encoderB.adapter]:
-                    for p in module.parameters():
-                        p.requires_grad = False
+                for param in self.encoder_fusion.parameters():
+                    param.requires_grad = True
 
                 if verbose:
                     print("[Stage1] Mixing sessions")
@@ -447,9 +500,16 @@ class FusionTrainer:
                     for p in module.parameters():
                         p.requires_grad = True
 
-                self.train_contrastive_phase(train_data_A, train_data_B,
-                                             train_data_sup_A, train_data_sup_B,
-                                             labels_sup, verbose, stage='adapt')
+                self.train_contrastive_phase(
+                    train_data_A,
+                    train_data_B,
+                    train_data_sup_A,
+                    train_data_sup_B,
+                    labels_sup,
+                    verbose,
+                    stage="adapt",
+                    unsup_by_session=unsup_sessions,
+                )
 
             else:
                 for param in self.encoder_fusion.parameters():
