@@ -13,7 +13,7 @@ def main(resume=False):
     # 数据路径
     data_path = r"D:\Homework\NLP project\ACC_DATA\ACC_DATA\TrainData"
     save_path = r"./checkpoints"
-    session_name = ["F3D5_outdoor", "F3D6_outdoor"]
+    session_name = ["F3D6_outdoor","F3D6_outdoor"]
     # 检查路径是否存在
     if not os.path.exists(data_path):
         print(f"❌ 数据路径不存在: {data_path}")
@@ -25,8 +25,8 @@ def main(resume=False):
         data_path,
         save_path,
         session_name,
-        N_feat_IMU=29,
-        N_feat_DLC=36,
+        N_feat_IMU=77,
+        N_feat_DLC=66,
         num_classes=12,
         spilit_num=1,
         device='auto',
@@ -46,8 +46,9 @@ def main(resume=False):
         'mlp_epochs': 1,
         'save_path': save_path,
         'save_gap': 5,
-        'n_cycles': 2,
         'n_stable': 1,
+        'n_adapted': 2,
+        'n_all': 3,
         'use_amp': True
     }
 
@@ -89,7 +90,7 @@ def main(resume=False):
 if __name__ == "__main__":
     success = main()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--resume', action='store_true', default=True, help='resume training from last checkpoint')
+    parser.add_argument('--resume', default=False, help='resume training from last checkpoint')
     args = parser.parse_args()
     success = main(resume=args.resume)
 

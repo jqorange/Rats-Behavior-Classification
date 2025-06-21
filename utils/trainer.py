@@ -38,8 +38,9 @@ class FusionTrainer:
             mlp_epochs=10,  # MLP训练的epoch数
             save_path=None,
             save_gap=5,
-            n_cycles=1,
             n_stable=1,
+            n_adapted=2,
+            n_all=3,
             use_amp=False
     ):
         """
@@ -67,8 +68,9 @@ class FusionTrainer:
         self.mlp_epochs = mlp_epochs
         self.path_prefix = save_path
         self.save_gap = save_gap
-        self.n_cycles = n_cycles
         self.n_stable = n_stable
+        self.n_adapted = n_adapted
+        self.n_all = n_all
 
         # AMP settings
         self.use_amp = use_amp and torch.cuda.is_available()
@@ -116,28 +118,32 @@ class FusionTrainer:
 
     def train_contrastive_phase(self,
                                 train_data_A, train_data_B,
-                                train_data_sup_A, train_data_sup_B, labels_sup,
-                                verbose=True, is_stable=False):
-        """Train contrastive phase: unsup-driven, sup sampled per batch"""
-        # 构造 Dataset 与 Loader
-        sup_ds = TensorDataset(
-            torch.from_numpy(train_data_sup_A).float(),
-            torch.from_numpy(train_data_sup_B).float(),
-            torch.from_numpy(labels_sup).long()
-        )
+                                train_data_sup_A=None, train_data_sup_B=None, labels_sup=None,
+                                verbose=True, stage='unsup'):
+        """Train contrastive phase for different stages."""
+
         unsup_ds = TensorDataset(
             torch.from_numpy(train_data_A).float(),
             torch.from_numpy(train_data_B).float()
         )
-        # Class-aware sampling for supervised data
-        label_counts = labels_sup.sum(axis=0) + 1e-6
-        label_freq = label_counts / label_counts.sum()
-        sample_weights = (labels_sup @ (1.0 / label_freq)).astype(np.float32)
-        sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
-        sup_loader = DataLoader(sup_ds,
-                                batch_size=min(self.batch_size, len(sup_ds)),
-                                sampler=sampler,
-                                drop_last=True)
+
+        if stage != 'unsup':
+            sup_ds = TensorDataset(
+                torch.from_numpy(train_data_sup_A).float(),
+                torch.from_numpy(train_data_sup_B).float(),
+                torch.from_numpy(labels_sup).long()
+            )
+            label_counts = labels_sup.sum(axis=0) + 1e-6
+            label_freq = label_counts / label_counts.sum()
+            sample_weights = (labels_sup @ (1.0 / label_freq)).astype(np.float32)
+            sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+            sup_loader = DataLoader(sup_ds,
+                                    batch_size=min(self.batch_size, len(sup_ds)),
+                                    sampler=sampler,
+                                    drop_last=True)
+        else:
+            sup_loader = None
+
         unsup_loader = DataLoader(unsup_ds,
                                   batch_size=min(self.batch_size, len(unsup_ds)),
                                   shuffle=True,
@@ -147,32 +153,38 @@ class FusionTrainer:
         for epoch in range(self.contrastive_epochs):
             epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'center_l':0.0, 'proto_l':0.0, 'total': 0.0}
             n_batches = 0
-            sup_iter = iter(sup_loader)
+            if sup_loader is not None:
+                sup_iter = iter(sup_loader)
 
             for xA_u, xB_u in tqdm.tqdm(unsup_loader,
                                         desc=f'Contrastive Epoch {epoch + 1}/{self.contrastive_epochs}'):
-                # 每个无监督 batch 配一个有监督 batch
-                try:
-                    xA_s, xB_s, y_s = next(sup_iter)
-                except StopIteration:
-                    sup_iter = iter(sup_loader)
-                    xA_s, xB_s, y_s = next(sup_iter)
-
+                if sup_loader is not None:
+                    try:
+                        xA_s, xB_s, y_s = next(sup_iter)
+                    except StopIteration:
+                        sup_iter = iter(sup_loader)
+                        xA_s, xB_s, y_s = next(sup_iter)
+                    xA_s, xB_s, y_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device)
                 # 移动到设备
                 xA_u, xB_u = xA_u.to(self.device), xB_u.to(self.device)
-                xA_s, xB_s, y_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device)
+
 
                 # Forward pass with AMP
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    f_u = self.encoder_fusion(xA_u, xB_u)  # (B, T, D)
-                    f_s = self.encoder_fusion(xA_s, xB_s)  # (B, T, D)
-                    if is_stable:
-                        # 计算两种对比损失
+                    f_u = self.encoder_fusion(xA_u, xB_u)
+                    if sup_loader is not None:
+                        f_s = self.encoder_fusion(xA_s, xB_s)
+
+                    if stage == 'all':
                         sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
                         center_l = self.center_loss(f_s, y_s)
                         proto_l = self.proto_loss(f_u)
                         loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
+                    elif stage == 'adapt':
+                        sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
+                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        loss = sup_loss + unsup_loss
                     else:
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
                         loss = unsup_loss
@@ -188,11 +200,15 @@ class FusionTrainer:
                     self.optimizer_encoder.step()
 
                 # 记录
-                if is_stable:
+                if stage == 'all':
                     epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
                     epoch_losses['center_l'] += center_l.item()
                     epoch_losses['proto_l'] += proto_l.item()
+                    epoch_losses['total'] += loss.item()
+                elif stage == 'adapt':
+                    epoch_losses['sup'] += sup_loss.item()
+                    epoch_losses['unsup'] += unsup_loss.item()
                     epoch_losses['total'] += loss.item()
                 else:
                     epoch_losses['unsup'] += unsup_loss.item()
@@ -207,8 +223,10 @@ class FusionTrainer:
 
             if verbose:
                 print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}")
-                if is_stable:
-                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f},Unsup={epoch_losses['center_l']:.8f},Unsup={epoch_losses['total']:.8f} ")
+                if stage == 'all':
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Center={epoch_losses['center_l']:.8f}, Proto={epoch_losses['proto_l']:.8f}")
+                elif stage == 'adapt':
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}")
             self.n_epochs += 1
 
         return contrastive_losses
@@ -234,7 +252,6 @@ class FusionTrainer:
         )
         test_loader = DataLoader(test_dataset, batch_size=min(self.batch_size, len(test_dataset)),
                                  shuffle=False, drop_last=False)
-
         mlp_losses = []
 
         # Freeze encoder
@@ -333,56 +350,60 @@ class FusionTrainer:
             'f1': f1
         }
 
-    def fit(self, train_data_A, train_data_B,train_data_sup_A, train_data_sup_B, labels_sup,
-            test_data_A, test_data_B, test_labels, verbose=True, start_cycle: int = 0):
-        """
-        Train the fusion model with alternating phases
-
-        Args:
-            train_data_A: (N, T, feat_A) - Modality A data for training (both contrastive and MLP)
-            train_data_B: (N, T, feat_B) - Modality B data for training (both contrastive and MLP)
-            labels: (N, C) - Multi-label binary targets for training
-            test_data_A: (M, T, feat_A) - Modality A data for testing MLP performance
-            test_data_B: (M, T, feat_B) - Modality B data for testing MLP performance
-            test_labels: (M, C) - Multi-label binary targets for testing
-            n_cycles: Number of contrastive+MLP cycles
-            verbose: Whether to print training progress
-        """
-        assert train_data_A.shape[1] == train_data_B.shape[1]  # Same sequence length
-
+    def fit(self, unsup_sessions, train_data_A, train_data_B,
+            train_data_sup_A, train_data_sup_B, labels_sup,
+            test_data_A, test_data_B, test_labels, verbose=True, start_epoch: int = 0):
+        """Train the model following the three-stage curriculum."""
+        assert train_data_A.shape[1] == train_data_B.shape[1]
         assert test_data_A.ndim == 3 and test_data_B.ndim == 3 and test_labels.ndim == 2
         assert test_data_A.shape[0] == test_data_B.shape[0] == test_labels.shape[0]
-        assert test_data_A.shape[1] == test_data_B.shape[1]  # Same sequence length
+        assert test_data_A.shape[1] == test_data_B.shape[1]
 
         all_losses = {'contrastive': [], 'mlp': [], 'test_performance': []}
-        is_stable = False
-        for cycle in range(start_cycle, self.n_cycles):
-            if cycle >= self.n_stable:
-                is_stable = True
 
+        for epoch in range(start_epoch, self.n_all):
             if verbose:
-                print(f"\n=== Training Cycle {cycle + 1}/{self.n_cycles} ===")
+                print(f"\n=== Epoch {epoch + 1}/{self.n_all} ===")
 
-            # Phase 1: Contrastive Learning (using train data)
-            if verbose:
-                print("Phase 1: Contrastive Learning")
-            contrastive_losses = self.train_contrastive_phase(
-                train_data_A, train_data_B, train_data_sup_A, train_data_sup_B, labels_sup, verbose, is_stable
-            )
-            all_losses['contrastive'].extend(contrastive_losses)
-            if is_stable:
-            # Phase 2: MLP Training (using same train data) + Test Evaluation
-                if verbose:
-                    print("Phase 2: MLP Training + Test Evaluation")
+            if epoch < self.n_stable:
+                for module in [self.encoder_fusion.encoderA.adapter, self.encoder_fusion.encoderB.adapter]:
+                    for p in module.parameters():
+                        p.requires_grad = False
+
+                for session, (imu_s, dlc_s) in unsup_sessions.items():
+                    if verbose:
+                        print(f"[Stage1] Session {session}")
+                    self.train_contrastive_phase(imu_s, dlc_s, None, None, None, verbose=False, stage='unsup')
+
+            elif epoch < self.n_adapted:
+                for param in self.encoder_fusion.parameters():
+                    param.requires_grad = False
+                for module in [self.encoder_fusion.encoderA.adapter, self.encoder_fusion.encoderB.adapter]:
+                    for p in module.parameters():
+                        p.requires_grad = True
+
+                self.train_contrastive_phase(train_data_A, train_data_B,
+                                             train_data_sup_A, train_data_sup_B,
+                                             labels_sup, verbose, stage='adapt')
+
+            else:
+                for param in self.encoder_fusion.parameters():
+                    param.requires_grad = True
+
+                contrastive_losses = self.train_contrastive_phase(
+                    train_data_A, train_data_B,
+                    train_data_sup_A, train_data_sup_B,
+                    labels_sup, verbose, stage='all')
+                all_losses['contrastive'].extend(contrastive_losses)
+
                 mlp_losses, test_performance = self.train_mlp_phase(
-                    train_data_sup_A, train_data_sup_B, labels_sup,  # Same training data
-                    test_data_A, test_data_B, test_labels,  # Different test data
-                    verbose
-                )
+                    train_data_sup_A, train_data_sup_B, labels_sup,
+                    test_data_A, test_data_B, test_labels, verbose)
                 all_losses['mlp'].extend(mlp_losses)
                 all_losses['test_performance'].append(test_performance)
-            if cycle % self.save_gap == 0:
-                self.save(cycle)
+
+            if epoch % self.save_gap == 0:
+                self.save(epoch)
 
         return all_losses
 

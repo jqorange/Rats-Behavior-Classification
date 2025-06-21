@@ -87,6 +87,7 @@ class TrainPipline:
 
         # ——— 无监督训练数据 ———
         train_IMU_list, train_DLC_list = [], []
+        self.unsup_by_session = {}
         for session in self.train_sessions:
             out = prepare_session(
                 [self.data_loader.train_IMU, self.data_loader.train_DLC],
@@ -96,7 +97,7 @@ class TrainPipline:
                 imu, dlc = out
                 train_IMU_list.append(imu)
                 train_DLC_list.append(dlc)
-
+                self.unsup_by_session[session] = (imu, dlc)
         if not train_IMU_list:
             raise ValueError("没有找到无监督训练数据")
         self.train_data_IMU = np.concatenate(train_IMU_list, axis=0)
@@ -105,6 +106,7 @@ class TrainPipline:
 
         # ——— 监督训练数据 ———
         sup_IMU_list, sup_DLC_list, sup_labels_list = [], [], []
+        self.sup_by_session = {}
         for session in self.train_sessions:
             out = prepare_session(
                 [self.data_loader.train_sup_IMU,
@@ -117,6 +119,7 @@ class TrainPipline:
                 sup_IMU_list.append(imu)
                 sup_DLC_list.append(dlc)
                 sup_labels_list.append(labels)
+                self.sup_by_session[session] = (imu, dlc, labels)
 
         if sup_IMU_list:
             self.train_sup_IMU = np.concatenate(sup_IMU_list, axis=0)
@@ -181,8 +184,9 @@ class TrainPipline:
             'mlp_epochs': 100,
             'save_path': self.save_path,
             'save_gap': 3,
-            'n_cycles': 10,
-            'n_stable': 2,
+            'n_stable': 1,
+            'n_adapted': 2,
+            'n_all': 3,
             'use_amp': False
         }
 
@@ -218,7 +222,7 @@ class TrainPipline:
 
         self.trainer.encoder_fusion.train()
 
-    def train_model(self, start_cycle=0, verbose=True):
+    def train_model(self, start_epoch=0, verbose=True):
         """训练模型"""
         print("\n=== 开始训练 ===")
 
@@ -246,6 +250,7 @@ class TrainPipline:
 
             # 训练模型
             losses = self.trainer.fit(
+                unsup_sessions=self.unsup_by_session,
                 train_data_A=self.train_data_IMU,
                 train_data_B=self.train_data_DLC,
                 train_data_sup_A=train_sup_IMU,
@@ -255,7 +260,7 @@ class TrainPipline:
                 test_data_B=test_data_DLC,
                 test_labels=test_labels,
                 verbose=verbose,
-                start_cycle=start_cycle
+                start_epoch=start_epoch
             )
 
             print("\n=== 训练完成 ===")
@@ -340,17 +345,17 @@ class TrainPipline:
                         if num > max_cycle:
                             max_cycle = num
                 if max_cycle >= 0:
-                    print(f"Resuming from checkpoint cycle {max_cycle}")
+                    print(f"Resuming from checkpoint epoch {max_cycle}")
                     self.trainer.load(max_cycle)
-                    start_cycle = max_cycle + 1
+                    start_epoch = max_cycle + 1
             else:
-                start_cycle = 0
+                start_epoch = 0
 
-            # 3. 测试模型组件
+                # 3. 测试模型组件
             self.test_model_components()
 
             # 4. 训练模型
-            losses = self.train_model(start_cycle=start_cycle)
+            losses = self.train_model(start_epoch=start_epoch)
 
             if losses is None:
                 print("❌ 训练失败")

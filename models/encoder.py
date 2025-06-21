@@ -2,20 +2,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .dilated_conv import DilatedConvEncoder
-
+from .domain_adapter import DomainAdapter
 class Encoder(nn.Module):
     def __init__(self, N_feat, d_model=64, depth=3, nhead=4, dropout=0.1):
         super().__init__()
         self.d_model = d_model
-
-        # === Two-layer preprocessing module ===
-        self.preprocess = nn.Sequential(
-            nn.Linear(N_feat, 2*d_model),
-            nn.LayerNorm(2*d_model),
-            nn.ReLU(),
-            nn.Linear(2*d_model, d_model),
-            nn.LayerNorm(d_model),
-        )
+        # === Domain adapter ===
+        self.adapter = DomainAdapter(N_feat, d_model)
 
         # === Dilated TCN block ===
         self.tcn = DilatedConvEncoder(d_model, [d_model] * depth, kernel_size=3)
@@ -44,8 +37,8 @@ class Encoder(nn.Module):
         """
         B, T, _ = x.shape
 
-        # === Preprocessing ===
-        h = self.preprocess(x)  # (B, T, d_model)
+        # === Domain adaptation ===
+        h = self.adapter(x)  # (B, T, d_model)
 
         # Apply mask (if any)
         if mask is not None:
