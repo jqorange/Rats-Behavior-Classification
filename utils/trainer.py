@@ -230,7 +230,73 @@ class FusionTrainer:
             self.n_epochs += 1
 
         return contrastive_losses
+    def train_contrastive_multi_session(self, session_data, verbose=True):
+        """Unsupervised contrastive training mixing sessions per batch."""
 
+        loaders = []
+        for imu, dlc in session_data.values():
+            ds = TensorDataset(
+                torch.from_numpy(imu).float(),
+                torch.from_numpy(dlc).float()
+            )
+            loader = DataLoader(
+                ds,
+                batch_size=min(self.batch_size, len(ds)),
+                shuffle=True,
+                drop_last=True,
+            )
+            loaders.append(loader)
+
+        if not loaders:
+            return []
+
+        total_batches = sum(len(l) for l in loaders)
+        contrastive_losses = []
+
+        for epoch in range(self.contrastive_epochs):
+            epoch_losses = {'unsup': 0.0, 'total': 0.0}
+            iters = [iter(l) for l in loaders]
+
+            for _ in range(total_batches):
+                idx = np.random.randint(len(loaders))
+                try:
+                    xA_u, xB_u = next(iters[idx])
+                except StopIteration:
+                    iters[idx] = iter(loaders[idx])
+                    xA_u, xB_u = next(iters[idx])
+
+                xA_u, xB_u = xA_u.to(self.device), xB_u.to(self.device)
+
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    fused = self.encoder_fusion(xA_u, xB_u)
+                    loss = compute_contrastive_losses(
+                        self, xA_u, xB_u, None, fused, is_supervised=False
+                    )
+
+                self.optimizer_encoder.zero_grad()
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer_encoder)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    self.optimizer_encoder.step()
+
+                epoch_losses['unsup'] += loss.item()
+                epoch_losses['total'] += loss.item()
+                self.n_iters += 1
+
+            for k in epoch_losses:
+                epoch_losses[k] /= total_batches
+            contrastive_losses.append(epoch_losses)
+
+            if verbose:
+                print(
+                    f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}"
+                )
+            self.n_epochs += 1
+
+        return contrastive_losses
     def train_mlp_phase(self, train_data_A, train_data_B, train_labels,
                         test_data_A, test_data_B, test_labels, verbose=True):
         """Train MLP phase and evaluate on test data for DWA update"""
@@ -370,10 +436,9 @@ class FusionTrainer:
                     for p in module.parameters():
                         p.requires_grad = False
 
-                for session, (imu_s, dlc_s) in unsup_sessions.items():
-                    if verbose:
-                        print(f"[Stage1] Session {session}")
-                    self.train_contrastive_phase(imu_s, dlc_s, None, None, None, verbose=False, stage='unsup')
+                if verbose:
+                    print("[Stage1] Mixing sessions")
+                self.train_contrastive_multi_session(unsup_sessions, verbose=verbose)
 
             elif epoch < self.n_adapted:
                 for param in self.encoder_fusion.parameters():
