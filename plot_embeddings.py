@@ -11,7 +11,7 @@ def load_channel_names(base_path, session):
     csv_path = os.path.join(base_path, "labels", session, f"label_{session}.csv")
     if os.path.exists(csv_path):
         df = pd.read_csv(csv_path)
-        return df.columns[1:].tolist()
+        return df.columns[1:13].tolist()
     return []
 
 
@@ -30,7 +30,7 @@ def main(args):
 
         label_file = os.path.join(args.data_path, "labels", f"{s}",f"label_{s}.csv")
         if os.path.exists(label_file):
-            labels = pd.read_csv(label_file).values[:, 1:]
+            labels = pd.read_csv(label_file).values[:, 1:13]
             if len(labels) > len(reps):
                 labels = labels[: len(reps)]
             elif len(labels) < len(reps):
@@ -117,8 +117,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot representations")
-    parser.add_argument("--data_path", default="D:\Jiaqi\TrainData", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"], help="Session names")
+    parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData", help="Base data path")
+    parser.add_argument("--sessions", nargs="+", default=["F3D6_outdoor", "F6D5_outdoor_2"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
     args = parser.parse_args()
     main(args)
