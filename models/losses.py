@@ -109,15 +109,15 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         center_start = max(center_start, 0)
         center_end = min(center_start + 5, T)
 
-        mask = (torch.rand(B, T, device=xA.device) < 0.3)
-        mask[:, center_start:center_end] = False
-        xA_masked = xA.clone()
-        xB_masked = xB.clone()
-        xA_masked[mask] = 0.0
-        xB_masked[mask] = 0.0
+        # mask = (torch.rand(B, T, device=xA.device) < 0.3)
+        # mask[:, center_start:center_end] = False
+        # xA_masked = xA.clone()
+        # xB_masked = xB.clone()
+        # xA_masked[mask] = 0.0
+        # xB_masked[mask] = 0.0
 
         # ----- Step 2: two random crops of length T-5 keeping the center region -----
-        crop_len = T - 5
+        crop_len = T - 15
         start_min = max(0, center_end - crop_len)
         start_max = min(center_start, T - crop_len)
         if start_max < start_min:
@@ -126,16 +126,20 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         offset1 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
         offset2 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
 
-        xA_crop1 = take_per_row(xA_masked, offset1, crop_len)
-        xB_crop1 = take_per_row(xB_masked, offset1, crop_len)
-        xA_crop2 = take_per_row(xA_masked, offset2, crop_len)
-        xB_crop2 = take_per_row(xB_masked, offset2, crop_len)
+        # xA_crop1 = take_per_row(xA_masked, offset1, crop_len)
+        # xB_crop1 = take_per_row(xB_masked, offset1, crop_len)
+        # xA_crop2 = take_per_row(xA_masked, offset2, crop_len)
+        # xB_crop2 = take_per_row(xB_masked, offset2, crop_len)
+        xA_crop1 = take_per_row(xA, offset1, crop_len)
+        xB_crop1 = take_per_row(xB, offset1, crop_len)
+        xA_crop2 = take_per_row(xA, offset2, crop_len)
+        xB_crop2 = take_per_row(xB, offset2, crop_len)
 
         out1 = self.encoder_fusion(xA_crop1, xB_crop1)
         out2 = self.encoder_fusion(xA_crop2, xB_crop2)
 
         # ----- Step 3: jitter after encoding -----
-        jitter_std = 0.02
+        jitter_std = 0.01
         out1 = out1 + torch.randn_like(out1) * jitter_std
         out2 = out2 + torch.randn_like(out2) * jitter_std
 
