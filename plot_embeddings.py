@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import silhouette_score
+from sklearn.metrics.pairwise import cosine_similarity
+from collections import defaultdict
 import plotly.graph_objects as go
 
 
@@ -13,6 +16,66 @@ def load_channel_names(base_path, session):
         df = pd.read_csv(csv_path)
         return df.columns[1:13].tolist()
     return []
+
+
+def compute_cluster_metrics(data_pca, labels, channel_names):
+    results = {}
+    valid_indices = np.array([np.argmax(row) if row.sum() > 0 else -1 for row in labels])
+
+    # Remove NANs
+    mask = valid_indices != -1
+    filtered_data = data_pca[mask]
+    filtered_labels = valid_indices[mask]
+
+    # 1. Silhouette Score
+    if len(np.unique(filtered_labels)) > 1:
+        sil_score = silhouette_score(filtered_data, filtered_labels, metric="cosine")
+    else:
+        sil_score = float("nan")
+
+    # 2. Center-to-sample cosine similarity
+    label_to_samples = defaultdict(list)
+    for i, label in enumerate(filtered_labels):
+        label_to_samples[label].append(filtered_data[i])
+
+    cos_sims = []
+    for label, samples in label_to_samples.items():
+        samples = np.vstack(samples)
+        center = samples.mean(axis=0, keepdims=True)
+        sims = cosine_similarity(samples, center)
+        cos_sims.extend(sims.flatten())
+    avg_cos_sim = np.mean(cos_sims)
+
+    # 3. Intra-class and inter-class distance
+    centers = {}
+    for label, samples in label_to_samples.items():
+        samples = np.vstack(samples)
+        centers[label] = samples.mean(axis=0)
+
+    # Intra-class
+    intra_dist = 0.0
+    total_count = 0
+    for label, samples in label_to_samples.items():
+        samples = np.vstack(samples)
+        dists = np.linalg.norm(samples - centers[label], axis=1)
+        intra_dist += dists.sum()
+        total_count += len(samples)
+    intra_avg = intra_dist / total_count
+
+    # Inter-class
+    center_list = list(centers.values())
+    inter_dists = []
+    for i in range(len(center_list)):
+        for j in range(i + 1, len(center_list)):
+            dist = np.linalg.norm(center_list[i] - center_list[j])
+            inter_dists.append(dist)
+    inter_avg = np.mean(inter_dists) if inter_dists else float("nan")
+
+    results["Silhouette Score"] = sil_score
+    results["Avg Center-to-Sample Cosine Sim"] = avg_cos_sim
+    results["Intra/Inter Distance Ratio"] = intra_avg / inter_avg if inter_avg > 0 else float("nan")
+
+    return results
 
 
 def main(args):
@@ -28,7 +91,7 @@ def main(args):
         reps = np.load(rep_file)
         rep_list.append(reps)
 
-        label_file = os.path.join(args.data_path, "labels", f"{s}",f"label_{s}.csv")
+        label_file = os.path.join(args.data_path, "labels", f"{s}", f"label_{s}.csv")
         if os.path.exists(label_file):
             labels = pd.read_csv(label_file).values[:, 1:13]
             if len(labels) > len(reps):
@@ -55,26 +118,11 @@ def main(args):
     channel_names.append("NAN")
 
     custom_colors = [
-        "rgb(255, 0, 0)",
-        "rgb(0, 255, 0)",
-        "rgb(0, 0, 255)",
-        "rgb(255, 255, 0)",
-        "rgb(0, 255, 255)",
-        "rgb(255, 0, 255)",
-        "rgb(128, 128, 128)",
-        "rgb(255, 165, 0)",
-        "rgb(75, 0, 130)",
-        "rgb(255, 105, 180)",
-        "rgb(34, 139, 34)",
-        "rgb(255, 20, 147)",
-        "rgb(238, 130, 238)",
-        "rgb(255, 69, 0)",
-        "rgb(60, 179, 113)",
-        "rgb(186, 85, 211)",
-        "rgb(128, 0, 128)",
-        "rgb(0, 191, 255)",
-        "rgb(139, 69, 19)",
-        "rgb(255, 222, 173)",
+        "rgb(255, 0, 0)", "rgb(0, 255, 0)", "rgb(0, 0, 255)", "rgb(255, 255, 0)",
+        "rgb(0, 255, 255)", "rgb(255, 0, 255)", "rgb(128, 128, 128)", "rgb(255, 165, 0)",
+        "rgb(75, 0, 130)", "rgb(255, 105, 180)", "rgb(34, 139, 34)", "rgb(255, 20, 147)",
+        "rgb(238, 130, 238)", "rgb(255, 69, 0)", "rgb(60, 179, 113)", "rgb(186, 85, 211)",
+        "rgb(128, 0, 128)", "rgb(0, 191, 255)", "rgb(139, 69, 19)", "rgb(255, 222, 173)",
     ]
     color_map = {name: custom_colors[i % len(custom_colors)] for i, name in enumerate(channel_names)}
     scatter_data = {name: ([], [], []) for name in channel_names}
@@ -114,10 +162,18 @@ def main(args):
     )
     fig.show()
 
+    # ✅ 打印结构性评估指标
+    if labels is not None:
+        metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])  # exclude "NAN"
+        print("\n=== Cluster Evaluation Metrics ===")
+        for k, v in metrics.items():
+            print(f"{k}: {v:.4f}")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plot representations")
-    parser.add_argument("--data_path", default="D:\Homework//NLP project\ACC_DATA\ACC_DATA\TrainData", help="Base data path")
+    parser = argparse.ArgumentParser(description="Plot representations with evaluation")
+    parser.add_argument("--data_path", default="D:/Homework/NLP project/ACC_DATA/ACC_DATA/TrainData",
+                        help="Base data path")
     parser.add_argument("--sessions", nargs="+", default=["F3D6_outdoor"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
     args = parser.parse_args()
