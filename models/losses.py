@@ -116,24 +116,18 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         # xA_masked[mask] = 0.0
         # xB_masked[mask] = 0.0
 
-        # ----- Step 2: two random crops of length T-5 keeping the center region -----
-        crop_len = T - 15
-        start_min = max(0, center_end - crop_len)
-        start_max = min(center_start, T - crop_len)
-        if start_max < start_min:
-            start_max = start_min
+        # ----- Step 2: two random crops following the TS2Vec strategy -----
+        crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=T + 1)
+        crop_left = np.random.randint(T - crop_l + 1)
+        crop_right = crop_left + crop_l
+        crop_eleft = np.random.randint(crop_left + 1)
+        crop_eright = np.random.randint(low=crop_right, high=T + 1)
+        crop_offset = torch.randint(low=-crop_eleft, high=T - crop_eright + 1, size=(B,), device=xA.device)
 
-        offset1 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
-        offset2 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
-
-        # xA_crop1 = take_per_row(xA_masked, offset1, crop_len)
-        # xB_crop1 = take_per_row(xB_masked, offset1, crop_len)
-        # xA_crop2 = take_per_row(xA_masked, offset2, crop_len)
-        # xB_crop2 = take_per_row(xB_masked, offset2, crop_len)
-        xA_crop1 = take_per_row(xA, offset1, crop_len)
-        xB_crop1 = take_per_row(xB, offset1, crop_len)
-        xA_crop2 = take_per_row(xA, offset2, crop_len)
-        xB_crop2 = take_per_row(xB, offset2, crop_len)
+        xA_crop1 = take_per_row(xA, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xB_crop1 = take_per_row(xB, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xA_crop2 = take_per_row(xA, crop_offset + crop_left, crop_eright - crop_left)
+        xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
 
         out1 = self.encoder_fusion(xA_crop1, xB_crop1)
         out2 = self.encoder_fusion(xA_crop2, xB_crop2)
