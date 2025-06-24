@@ -104,56 +104,34 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         if T <= 5:
             return torch.tensor(0.0, device=xA.device)
 
-            # ----- Step 1: random masking (exclude center 5 frames) -----
-        center_start = T // 2 - 2
-        center_start = max(center_start, 0)
-        center_end = min(center_start + 5, T)
 
-        # mask = (torch.rand(B, T, device=xA.device) < 0.3)
-        # mask[:, center_start:center_end] = False
-        # xA_masked = xA.clone()
-        # xB_masked = xB.clone()
-        # xA_masked[mask] = 0.0
-        # xB_masked[mask] = 0.0
 
-        # ----- Step 2: two random crops of length T-5 keeping the center region -----
-        crop_len = T - 15
-        start_min = max(0, center_end - crop_len)
-        start_max = min(center_start, T - crop_len)
-        if start_max < start_min:
-            start_max = start_min
+        # ----- Step 2: two random crops following the TS2Vec strategy -----
+        crop_l = np.random.randint(low=2 ** (self.temporal_unit + 1), high=T + 1)
+        crop_left = np.random.randint(T - crop_l + 1)
+        crop_right = crop_left + crop_l
+        crop_eleft = np.random.randint(crop_left + 1)
+        crop_eright = np.random.randint(low=crop_right, high=T + 1)
+        crop_offset = torch.randint(low=-crop_eleft, high=T - crop_eright + 1, size=(B,), device=xA.device)
 
-        offset1 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
-        offset2 = torch.randint(start_min, start_max + 1, (B,), device=xA.device)
-
-        # xA_crop1 = take_per_row(xA_masked, offset1, crop_len)
-        # xB_crop1 = take_per_row(xB_masked, offset1, crop_len)
-        # xA_crop2 = take_per_row(xA_masked, offset2, crop_len)
-        # xB_crop2 = take_per_row(xB_masked, offset2, crop_len)
-        xA_crop1 = take_per_row(xA, offset1, crop_len)
-        xB_crop1 = take_per_row(xB, offset1, crop_len)
-        xA_crop2 = take_per_row(xA, offset2, crop_len)
-        xB_crop2 = take_per_row(xB, offset2, crop_len)
+        xA_crop1 = take_per_row(xA, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xB_crop1 = take_per_row(xB, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xA_crop2 = take_per_row(xA, crop_offset + crop_left, crop_eright - crop_left)
+        xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
 
         out1 = self.encoder_fusion(xA_crop1, xB_crop1)
         out2 = self.encoder_fusion(xA_crop2, xB_crop2)
-
-        # ----- Step 3: jitter after encoding -----
-        jitter_std = 0.01
-        out1 = out1 + torch.randn_like(out1) * jitter_std
-        out2 = out2 + torch.randn_like(out2) * jitter_std
+        #
+        # # ----- Step 3: jitter after encoding -----
+        # jitter_std = 0.01
+        # out1 = out1 + torch.randn_like(out1) * jitter_std
+        # out2 = out2 + torch.randn_like(out2) * jitter_std
 
         # ----- Step 4: main hierarchical contrastive loss -----
         loss_main = hierarchical_contrastive_loss(out1, out2, temporal_unit=self.temporal_unit)
 
-        # ----- Step 5: additional loss on pooled center region -----
-        center_off1 = (center_start - offset1).clamp(0, crop_len - 5)
-        center_off2 = (center_start - offset2).clamp(0, crop_len - 5)
-        part1 = take_per_row(out1, center_off1, 5).max(dim=1)[0].unsqueeze(1)
-        part2 = take_per_row(out2, center_off2, 5).max(dim=1)[0].unsqueeze(1)
-        loss_center = hierarchical_contrastive_loss(part1, part2, temporal_unit=self.temporal_unit)
 
-        return loss_main + loss_center
+        return loss_main
 class CenterLoss(nn.Module):
     """Center loss that encourages features of the same class to cluster."""
 
