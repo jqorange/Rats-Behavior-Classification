@@ -11,7 +11,7 @@ def main(resume=False):
     np.random.seed(42)
    # ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
     # 数据路径
-    data_path = r"D:\Homework\NLP project\ACC_DATA\ACC_DATA\TrainData"
+    data_path = r"D:\Jiaqi\Datasets\Rats\TrainData"
     save_path = r"./checkpoints"
     session_name = ["F3D6_outdoor", "F3D6_outdoor"]
     # 检查路径是否存在
@@ -36,12 +36,12 @@ def main(resume=False):
     # 训练参数
     trainer_params = {
         'mask_type': 'binomial',
-        'd_model': 16,
+        'd_model': 32,
         'nhead': 4,
         'hidden_dim': 4,
         'lr_encoder': 0.001,
         'lr_classifier': 0.001,
-        'batch_size': 128,
+        'batch_size': 256,
         'contrastive_epochs': 1,
         'mlp_epochs': 1,
         'save_path': save_path,

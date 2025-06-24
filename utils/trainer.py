@@ -554,7 +554,7 @@ class FusionTrainer:
             torch.from_numpy(data_B).float()
         )
         loader = DataLoader(dataset, batch_size=batch_size)
-
+        self.encoder_fusion.mask_type = None
         self.encoder_fusion.eval()
 
         with torch.no_grad():
@@ -569,11 +569,7 @@ class FusionTrainer:
                 if pool:
                     # global max pooling
                     global_feat = out.max(dim=1).values
-                    # center_start = out.size(1) // 2 - 2
-                    # center_start = max(center_start, 0)
-                    # center_end = min(center_start + 5, out.size(1))
-                    # center_feat = out[:, center_start:center_end].max(dim=1).values
-                    # out = torch.stack([center_feat, global_feat], dim=1)
+
                     out = global_feat.view(-1, self.d_model)
                 outputs.append(out.cpu())
 

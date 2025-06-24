@@ -115,9 +115,13 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         crop_offset = torch.randint(low=-crop_eleft, high=T - crop_eright + 1, size=(B,), device=xA.device)
 
         xA_crop1 = take_per_row(xA, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xA_crop1 = xA_crop1[:, -crop_l:]
         xB_crop1 = take_per_row(xB, crop_offset + crop_eleft, crop_right - crop_eleft)
+        xB_crop1 = xB_crop1[:, -crop_l:]
         xA_crop2 = take_per_row(xA, crop_offset + crop_left, crop_eright - crop_left)
+        xA_crop2 = xA_crop2[:, :crop_l]
         xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
+        xB_crop2 = xB_crop2[:, :crop_l]
 
         out1 = self.encoder_fusion(xA_crop1, xB_crop1)
         out2 = self.encoder_fusion(xA_crop2, xB_crop2)
