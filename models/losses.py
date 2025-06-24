@@ -3,6 +3,28 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
+
+def js_divergence_loss(features: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Jensen-Shannon divergence of feature distributions within a batch.
+
+    The features from each sample are averaged over time and turned into
+    probability distributions with ``softmax``. The loss encourages all
+    sample distributions to match the batch mean distribution.
+
+    Args:
+        features: Tensor of shape ``(B, T, D)``.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Scalar JS divergence loss.
+    """
+    B = features.size(0)
+    probs = torch.softmax(features.mean(dim=1), dim=-1)
+    mean_prob = probs.mean(dim=0, keepdim=True)
+
+    kl_pm = (probs * (probs.add(eps).log() - mean_prob.add(eps).log())).sum(dim=-1).mean()
+    kl_mp = (mean_prob * (mean_prob.add(eps).log() - probs.add(eps).log())).sum(dim=-1).mean()
+    return 0.5 * (kl_pm + kl_mp)
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0

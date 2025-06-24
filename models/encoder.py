@@ -4,11 +4,28 @@ import torch.nn.functional as F
 from .dilated_conv import DilatedConvEncoder
 from .domain_adapter import DomainAdapter
 class Encoder(nn.Module):
+    """Dilated convolutional encoder with optional session adapters."""
+
     def __init__(self, N_feat, d_model=64, depth=3, nhead=4, dropout=0.1):
         super().__init__()
         self.d_model = d_model
-        # === Domain adapter ===
-        self.adapter = DomainAdapter(N_feat, d_model)
+
+        # === Input projection ===
+        # A simple linear layer acts as the universal input interface.
+        self.input_linear = nn.Linear(N_feat, d_model)
+
+        # === Optional adapters ===
+        # ``pre_adapter`` is used in stage 2 for session alignment.
+        # ``post_adapter`` is used in stage 1 for session-specific spaces.
+        self.pre_adapter = DomainAdapter(d_model, d_model)
+        self.post_adapter = DomainAdapter(d_model, d_model)
+
+        # Simple linear layer used in stage 2 after removing the post adapter
+        self.output_linear = nn.Linear(d_model, d_model)
+
+        # Flag to switch between stage1 and stage2 behaviour
+        self.use_output_linear = False
+
 
         # === Dilated TCN block ===
         self.tcn = DilatedConvEncoder(d_model, [d_model] * depth, kernel_size=3)
@@ -26,6 +43,12 @@ class Encoder(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
 
         self.dropout = nn.Dropout(dropout)
+    def set_stage(self, stage: str):
+        """Configure adapters for the given training stage."""
+        if stage == "stage1":
+            self.use_output_linear = False
+        elif stage == "stage2":
+            self.use_output_linear = True
 
     def forward(self, x, mask=None):
         """
@@ -36,9 +59,12 @@ class Encoder(nn.Module):
             h: Tensor of shape (B, T, d_model)
         """
         B, T, _ = x.shape
+        # === Input linear projection ===
+        h = self.input_linear(x)
+        if self.use_output_linear == False:
+        # === Optional pre-adapter (session alignment in stage 2) ===
+            h = self.pre_adapter(h)
 
-        # === Domain adaptation ===
-        h = self.adapter(x)  # (B, T, d_model)
 
         # Apply mask (if any)
         if mask is not None:
@@ -52,5 +78,11 @@ class Encoder(nn.Module):
         # === Transformer global context ===
         h = self.trans(h)
         h = self.norm3(h)
+
+        # === Optional post-adapter ===
+        if self.use_output_linear:
+            h = self.output_linear(h)
+        else:
+            h = self.post_adapter(h)
 
         return h  # (B, T, d_model)

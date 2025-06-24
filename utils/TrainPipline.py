@@ -198,7 +198,7 @@ class TrainPipline:
 
         print(f"模型参数数量:")
         print(f"  - Encoder: {sum(p.numel() for p in self.trainer.encoder_fusion.parameters()):,}")
-        print(f"  - Classifier: {sum(p.numel() for p in self.trainer.classifier.parameters()):,}")
+
 
         return self.trainer
 
@@ -265,9 +265,7 @@ class TrainPipline:
 
             print("\n=== 训练完成 ===")
             print(f"对比学习损失历史: {len(losses['contrastive'])} 个epoch")
-            print(f"MLP损失历史: {len(losses['mlp'])} 个epoch")
-            if 'test_performance' in losses:
-                print(f"最终测试性能: {losses['test_performance']}")
+
 
             return losses
 
@@ -361,14 +359,12 @@ class TrainPipline:
                 print("❌ 训练失败")
                 return False
 
-            # 5. 评估模型
-            predictions = self.evaluate_model()
 
             print("\n" + "=" * 60)
             print("🎉 训练流水线完成!")
             print(f"✅ 数据加载: 成功")
             print(f"✅ 模型训练: 成功")
-            print(f"✅ 模型评估: {'成功' if predictions is not None else '跳过'}")
+
 
             return True
 
