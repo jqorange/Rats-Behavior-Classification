@@ -85,7 +85,7 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
     return loss
 
 
-def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=True):
+def compute_contrastive_losses(self, xA, xB, labels, fused_repr,session_idx, is_supervised=True):
     """Compute either supervised or unsupervised contrastive loss based on mode."""
 
     if is_supervised:
@@ -120,9 +120,9 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
 
 
-        out1 = self.encoder_fusion(xA_crop1, xB_crop1)
+        out1 = self.encoder_fusion(xA_crop1, xB_crop1,session_idx)
         out1 = out1[:, -crop_l:]
-        out2 = self.encoder_fusion(xA_crop2, xB_crop2)
+        out2 = self.encoder_fusion(xA_crop2, xB_crop2, session_idx)
         out2 = out2[:, :crop_l]
         #
         # ----- Step 3: jitter after encoding -----
@@ -199,3 +199,27 @@ class UncertaintyWeighting(nn.Module):
             precision = torch.exp(-self.log_vars[i])
             weighted.append(precision * L + self.log_vars[i])
         return sum(weighted)
+
+def batch_js_divergence(features: torch.Tensor, session_ids: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """Compute average JS divergence between session feature distributions."""
+    unique_sessions = session_ids.unique()
+    if unique_sessions.numel() <= 1:
+        return features.new_tensor(0.0)
+
+    probs = []
+    for s in unique_sessions:
+        mask = session_ids == s
+        feat = features[mask].mean(dim=(0, 1))
+        probs.append(torch.softmax(feat, dim=-1))
+
+    js = 0.0
+    count = 0
+    for i in range(len(probs)):
+        for j in range(i + 1, len(probs)):
+            p = probs[i]
+            q = probs[j]
+            m = 0.5 * (p + q)
+            js += 0.5 * (F.kl_div(p.log(), m, reduction="sum") + F.kl_div(q.log(), m, reduction="sum"))
+            count += 1
+
+    return js / max(count, 1)

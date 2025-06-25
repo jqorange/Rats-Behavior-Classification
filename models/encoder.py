@@ -3,12 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .dilated_conv import DilatedConvEncoder
 from .domain_adapter import DomainAdapter
+
+
 class Encoder(nn.Module):
-    def __init__(self, N_feat, d_model=64, depth=10, nhead=4, dropout=0.1):
+    def __init__(self, N_feat, d_model=64, depth=10, nhead=4, dropout=0.1,
+                 num_sessions: int = 0):
         super().__init__()
         self.d_model = d_model
         # === Domain adapter ===
-        self.adapter = DomainAdapter(N_feat, d_model)
+        self.adapter = DomainAdapter(N_feat, d_model, num_sessions=num_sessions, dropout=dropout)
+        self.adapter.set_mode("none")
 
         # === Dilated TCN block ===
         self.tcn = DilatedConvEncoder(d_model, [d_model] * depth, kernel_size=3)
@@ -27,7 +31,9 @@ class Encoder(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, mask=None):
+    def forward(
+        self, x: torch.Tensor, session_idx: torch.Tensor | None = None, mask=None
+    ) -> torch.Tensor:
         """
         Args:
             x: Tensor of shape (B, T, N_feat)
@@ -38,7 +44,7 @@ class Encoder(nn.Module):
         B, T, _ = x.shape
 
         # === Domain adaptation ===
-        h = self.adapter(x)  # (B, T, d_model)
+        h = self.adapter(x, session_idx=session_idx)  # (B, T, d_model)
 
         # Apply mask (if any)
         if mask is not None:

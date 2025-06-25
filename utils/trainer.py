@@ -9,10 +9,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tqdm
 from models.losses import (
     compute_contrastive_losses,
-    CenterLoss,
-    PrototypeClusterLoss,
-    UncertaintyWeighting,
-)
+    batch_js_divergence,)
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
@@ -41,7 +38,8 @@ class FusionTrainer:
             n_stable=1,
             n_adapted=2,
             n_all=3,
-            use_amp=False
+            use_amp=False,
+            num_sessions=0
     ):
         """
         Args:
@@ -83,7 +81,8 @@ class FusionTrainer:
             N_feat_B=N_feat_B,
             mask_type=mask_type,
             d_model=d_model,
-            nhead=nhead
+            nhead=nhead,
+            num_sessions=num_sessions,
         ).to(device)
 
 
@@ -105,12 +104,11 @@ class FusionTrainer:
         )
 
 
-        self.loss_weighter = UncertaintyWeighting(num_losses=4)
+
 
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
-        self.center_loss = CenterLoss(num_classes, d_model)
-        self.proto_loss = PrototypeClusterLoss(num_classes, d_model)
+
 
         self.n_epochs = 0
         self.n_iters = 0
@@ -119,8 +117,10 @@ class FusionTrainer:
             self,
             train_data_A,
             train_data_B,
+            train_ids,
             train_data_sup_A=None,
             train_data_sup_B=None,
+            sup_ids=None,
             labels_sup=None,
             verbose=True,
             stage="unsup",
@@ -150,6 +150,7 @@ class FusionTrainer:
             sup_ds = TensorDataset(
                 torch.from_numpy(train_data_sup_A).float(),
                 torch.from_numpy(train_data_sup_B).float(),
+                torch.from_numpy(train_ids).long(),
                 torch.from_numpy(labels_sup).long()
             )
             label_counts = labels_sup.sum(axis=0) + 1e-6
@@ -165,10 +166,11 @@ class FusionTrainer:
 
         if stage == 'adapt' and unsup_by_session:
             unsup_loaders = []
-            for imu, dlc in unsup_by_session.values():
+            for imu, dlc, ids in unsup_by_session.values():
                 ds = TensorDataset(
                     torch.from_numpy(imu).float(),
                     torch.from_numpy(dlc).float(),
+                    torch.from_numpy(ids).long(),
                 )
                 loader = DataLoader(
                     ds,
@@ -193,8 +195,7 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'unsup': 0.0,
-                'center_l': 0.0,
-                'proto_l': 0.0,
+                'js': 0.0,
                 'total': 0.0,
             }
             n_batches = 0
@@ -209,37 +210,36 @@ class FusionTrainer:
             ):
                 idx = np.random.randint(len(unsup_loaders))
                 try:
-                    xA_u, xB_u = next(unsup_iters[idx])
+                    xA_u, xB_u, id_u = next(unsup_iters[idx])
                 except StopIteration:
                     unsup_iters[idx] = iter(unsup_loaders[idx])
-                    xA_u, xB_u = next(unsup_iters[idx])
+                    xA_u, xB_u, id_u = next(unsup_iters[idx])
                 if sup_loader is not None:
                     try:
-                        xA_s, xB_s, y_s = next(sup_iter)
+                        xA_s, xB_s, y_s, id_s = next(sup_iter)
                     except StopIteration:
                         sup_iter = iter(sup_loader)
-                        xA_s, xB_s, y_s = next(sup_iter)
-                    xA_s, xB_s, y_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device)
-                # 移动到设备
-                xA_u, xB_u = xA_u.to(self.device), xB_u.to(self.device)
-
+                        xA_s, xB_s, y_s, id_s = next(sup_iter)
+                    xA_s, xB_s, y_s, id_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device), id_s.to(
+                        self.device)
+                    # 移动到设备
+                xA_u, xB_u, id_u = xA_u.to(self.device), xB_u.to(self.device), id_u.to(self.device)
 
                 # Forward pass with AMP
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    f_u = self.encoder_fusion(xA_u, xB_u)
+                    f_u = self.encoder_fusion(xA_u, xB_u, id_u)
                     if sup_loader is not None:
-                        f_s = self.encoder_fusion(xA_s, xB_s)
+                        f_s = self.encoder_fusion(xA_s, xB_s, id_s)
 
                     if stage == 'all':
                         sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                        center_l = self.center_loss(f_s, y_s)
-                        proto_l = self.proto_loss(f_u)
-                        loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
+                        loss = sup_loss + unsup_loss
                     elif stage == 'adapt':
                         sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                        loss = sup_loss + unsup_loss
+                        js_loss = batch_js_divergence(f_s.detach(), id_s)
+                        loss = sup_loss + unsup_loss + js_loss
                     else:
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
                         loss = unsup_loss
@@ -258,12 +258,11 @@ class FusionTrainer:
                 if stage == 'all':
                     epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
-                    epoch_losses['center_l'] += center_l.item()
-                    epoch_losses['proto_l'] += proto_l.item()
                     epoch_losses['total'] += loss.item()
                 elif stage == 'adapt':
                     epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
+                    epoch_losses['js'] += js_loss.item()
                     epoch_losses['total'] += loss.item()
                 else:
                     epoch_losses['unsup'] += unsup_loss.item()
@@ -279,9 +278,9 @@ class FusionTrainer:
             if verbose:
                 print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}")
                 if stage == 'all':
-                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Center={epoch_losses['center_l']:.8f}, Proto={epoch_losses['proto_l']:.8f}")
-                elif stage == 'adapt':
                     print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}")
+                elif stage == 'adapt':
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, JS={epoch_losses['js']:.8f}")
             self.n_epochs += 1
 
         return contrastive_losses
@@ -289,10 +288,11 @@ class FusionTrainer:
         """Unsupervised contrastive training mixing sessions per batch."""
 
         loaders = []
-        for imu, dlc in session_data.values():
+        for imu, dlc, ids in session_data.values():
             ds = TensorDataset(
                 torch.from_numpy(imu).float(),
-                torch.from_numpy(dlc).float()
+                torch.from_numpy(dlc).float(),
+                torch.from_numpy(ids).long(),
             )
             loader = DataLoader(
                 ds,
@@ -315,17 +315,16 @@ class FusionTrainer:
             for _ in range(total_batches):
                 idx = np.random.randint(len(loaders))
                 try:
-                    xA_u, xB_u = next(iters[idx])
+                    xA_u, xB_u, id_u = next(iters[idx])
                 except StopIteration:
                     iters[idx] = iter(loaders[idx])
-                    xA_u, xB_u = next(iters[idx])
+                    xA_u, xB_u, id_u = next(iters[idx])
 
-                xA_u, xB_u = xA_u.to(self.device), xB_u.to(self.device)
+                xA_u, xB_u, id_u = xA_u.to(self.device), xB_u.to(self.device), id_u.to(self.device)
 
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    fused = self.encoder_fusion(xA_u, xB_u)
                     loss = compute_contrastive_losses(
-                        self, xA_u, xB_u, None, fused, is_supervised=False
+                        self, xA_u, xB_u, None, fused_repr=None, session_idx=id_u, is_supervised=False
                     )
 
                 self.optimizer_encoder.zero_grad()
@@ -471,8 +470,8 @@ class FusionTrainer:
             'f1': f1
         }
 
-    def fit(self, unsup_sessions, train_data_A, train_data_B,
-            train_data_sup_A, train_data_sup_B, labels_sup,
+    def fit(self, unsup_sessions, train_data_A, train_data_B, train_ids,
+            train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
             test_data_A, test_data_B, test_labels, verbose=True, start_epoch: int = 0):
         """Train the model following the three-stage curriculum."""
         assert train_data_A.shape[1] == train_data_B.shape[1]
@@ -504,8 +503,10 @@ class FusionTrainer:
                 self.train_contrastive_phase(
                     train_data_A,
                     train_data_B,
+                    train_ids,
                     train_data_sup_A,
                     train_data_sup_B,
+                    sup_ids,
                     labels_sup,
                     verbose,
                     stage="adapt",
@@ -517,8 +518,9 @@ class FusionTrainer:
                     param.requires_grad = True
 
                 contrastive_losses = self.train_contrastive_phase(
-                    train_data_A, train_data_B,
+                    train_data_A, train_data_B, train_ids,
                     train_data_sup_A, train_data_sup_B,
+                    sup_ids,
                     labels_sup, verbose, stage='all')
                 all_losses['contrastive'].extend(contrastive_losses)
 
@@ -628,14 +630,41 @@ class FusionTrainer:
 
     def save(self, num):
         """Save the trained models"""
-        torch.save(self.encoder_fusion.state_dict(), f"./{self.path_prefix}/encoder_{num}.pkl")
-        torch.save(self.classifier.state_dict(), f"./{self.path_prefix}/classifier_{num}.pkl")
+        torch.save({
+            # 保存 encoderA 部分（包括 adapter + TCN + trans）
+            'adapterA': self.encoder_fusion.encoderA.adapter.state_dict(),
+
+            # 保存 encoderB 部分
+            'adapterB': self.encoder_fusion.encoderB.adapter.state_dict(),
+
+            'encoderA_rest': {
+                k: v for k, v in self.encoder_fusion.encoderA.state_dict().items()
+                if not k.startswith("adapter.")
+            },
+            'encoderB_rest': {
+                k: v for k, v in self.encoder_fusion.encoderB.state_dict().items()
+                if not k.startswith("adapter.")
+            },
+            'cross_attn': self.encoder_fusion.cross_attn.state_dict(),
+            'gate': self.encoder_fusion.gate.state_dict(),
+            'norm': self.encoder_fusion.norm.state_dict(),
+        }, f"./{self.path_prefix}/encoder_{num}.pkl")
 
     def load(self, num):
-        """Load the trained models"""
-        self.encoder_fusion.load_state_dict(
-            torch.load(f"./{self.path_prefix}/encoder_{num}.pkl", map_location=self.device)
-        )
-        self.classifier.load_state_dict(
-            torch.load(f"./{self.path_prefix}/classifier_{num}.pkl", map_location=self.device)
-        )
+        """Load the saved model parts into encoder_fusion"""
+        state = torch.load(f"./{self.path_prefix}/encoder_{num}.pkl", map_location='cpu')
+
+        # === 加载 adapter 部分 ===
+        self.encoder_fusion.encoderA.adapter.load_state_dict(state['adapterA'])
+        self.encoder_fusion.encoderB.adapter.load_state_dict(state['adapterB'])
+
+        # === 加载 encoder 主体（不包括 adapter）===
+        self.encoder_fusion.encoderA.load_state_dict(state['encoderA_rest'], strict=False)
+        self.encoder_fusion.encoderB.load_state_dict(state['encoderB_rest'], strict=False)
+
+        # === 加载跨模态融合部分 ===
+        self.encoder_fusion.cross_attn.load_state_dict(state['cross_attn'])
+        self.encoder_fusion.gate.load_state_dict(state['gate'])
+        self.encoder_fusion.norm.load_state_dict(state['norm'])
+
+        print(f"[INFO] Successfully loaded model from encoder_{num}.pkl")

@@ -86,8 +86,9 @@ class TrainPipline:
             return truncated
 
         # ——— 无监督训练数据 ———
-        train_IMU_list, train_DLC_list = [], []
+        train_IMU_list, train_DLC_list, train_ids_list = [], [], []
         self.unsup_by_session = {}
+        self.session_to_idx = {}
         for session in self.train_sessions:
             out = prepare_session(
                 [self.data_loader.train_IMU, self.data_loader.train_DLC],
@@ -95,17 +96,21 @@ class TrainPipline:
             )
             if out:
                 imu, dlc = out
+                idx = len(self.session_to_idx)
+                self.session_to_idx[session] = idx
                 train_IMU_list.append(imu)
                 train_DLC_list.append(dlc)
-                self.unsup_by_session[session] = (imu, dlc)
+                train_ids_list.append(np.full(len(imu), idx, dtype=np.int64))
+                self.unsup_by_session[session] = (imu, dlc, np.full(len(imu), idx, dtype=np.int64))
         if not train_IMU_list:
             raise ValueError("没有找到无监督训练数据")
         self.train_data_IMU = np.concatenate(train_IMU_list, axis=0)
         self.train_data_DLC = np.concatenate(train_DLC_list, axis=0)
+        self.train_session_ids = np.concatenate(train_ids_list, axis=0)
         print(f"合并后无监督数据: IMU {self.train_data_IMU.shape}, DLC {self.train_data_DLC.shape}")
 
         # ——— 监督训练数据 ———
-        sup_IMU_list, sup_DLC_list, sup_labels_list = [], [], []
+        sup_IMU_list, sup_DLC_list, sup_labels_list, sup_ids_list = [], [], [], []
         self.sup_by_session = {}
         for session in self.train_sessions:
             out = prepare_session(
@@ -116,15 +121,18 @@ class TrainPipline:
             )
             if out:
                 imu, dlc, labels = out
+                idx = self.session_to_idx[session]
                 sup_IMU_list.append(imu)
                 sup_DLC_list.append(dlc)
                 sup_labels_list.append(labels)
-                self.sup_by_session[session] = (imu, dlc, labels)
+                sup_ids_list.append(np.full(len(imu), idx, dtype=np.int64))
+                self.sup_by_session[session] = (imu, dlc, labels, np.full(len(imu), idx, dtype=np.int64))
 
         if sup_IMU_list:
             self.train_sup_IMU = np.concatenate(sup_IMU_list, axis=0)
             self.train_sup_DLC = np.concatenate(sup_DLC_list, axis=0)
             self.train_labels = np.concatenate(sup_labels_list, axis=0)
+            self.train_sup_ids = np.concatenate(sup_ids_list, axis=0)
             print(
                 f"合并后监督数据: IMU {self.train_sup_IMU.shape}, DLC {self.train_sup_DLC.shape}, Labels {self.train_labels.shape}")
         else:
@@ -190,6 +198,7 @@ class TrainPipline:
             'use_amp': False
         }
 
+        default_params['num_sessions'] = len(self.train_sessions)
         # 更新参数
         default_params.update(kwargs)
 
@@ -253,8 +262,10 @@ class TrainPipline:
                 unsup_sessions=self.unsup_by_session,
                 train_data_A=self.train_data_IMU,
                 train_data_B=self.train_data_DLC,
+                train_ids=self.train_session_ids,
                 train_data_sup_A=train_sup_IMU,
                 train_data_sup_B=train_sup_DLC,
+                sup_ids=self.train_sup_ids if len(self.train_sup_IMU) else None,
                 labels_sup=train_labels,
                 test_data_A=test_data_IMU,
                 test_data_B=test_data_DLC,
@@ -351,8 +362,8 @@ class TrainPipline:
             else:
                 start_epoch = 0
 
-                # 3. 测试模型组件
-            self.test_model_components()
+            #     # 3. 测试模型组件
+            # self.test_model_components()
 
             # 4. 训练模型
             losses = self.train_model(start_epoch=start_epoch)

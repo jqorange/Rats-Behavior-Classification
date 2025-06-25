@@ -4,15 +4,19 @@ import torch.nn as nn
 from .encoder import Encoder  # unified modality encoder
 from .masking import generate_continuous_mask, generate_binomial_mask  # mask functions
 import torch.nn.functional as F
+from .domain_adapter import DomainAdapter
 
 class EncoderFusion(nn.Module):
 
-    def __init__(self, N_feat_A, N_feat_B, mask_type=None,d_model=64, nhead=4, dropout=0.1):
+    def __init__(self, N_feat_A, N_feat_B, mask_type=None, d_model=64, nhead=4,
+                 dropout=0.1, num_sessions: int = 0):
         super().__init__()
 
         # Single-modal encoders
-        self.encoderA = Encoder(N_feat_A, d_model=d_model, nhead=nhead)
-        self.encoderB = Encoder(N_feat_B, d_model=d_model, nhead=nhead)
+        self.encoderA = Encoder(N_feat_A, d_model=d_model, nhead=nhead,
+                               dropout=dropout, num_sessions=num_sessions)
+        self.encoderB = Encoder(N_feat_B, d_model=d_model, nhead=nhead,
+                               dropout=dropout, num_sessions=num_sessions)
         self.mask_type = mask_type
         # Cross-attention from A→B
         self.cross_attn = nn.MultiheadAttention(
@@ -28,15 +32,10 @@ class EncoderFusion(nn.Module):
         # LayerNorm for residual fusion
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
-        self.projection = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.ReLU(),
-            nn.LayerNorm(d_model),
-            nn.Dropout(dropout),
-            nn.Linear(d_model, d_model)
-        )
+        self.projection = DomainAdapter(d_model, d_model, num_sessions=num_sessions, dropout=dropout)
+        self.projection.set_mode("aware")
 
-    def forward(self, xA, xB):
+    def forward(self, xA, xB, session_idx=None):
         """
         mask_type: 'binomial' or 'continuous'
         Returns two fused masked representations h1, h2
@@ -52,8 +51,8 @@ class EncoderFusion(nn.Module):
             mask = None
 
         # First masked forward pass
-        hA = self.encoderA(xA, mask=mask)  # B×T×D
-        hB = self.encoderB(xB, mask=mask)  # B×T×D
+        hA = self.encoderA(xA, session_idx=session_idx, mask=mask)  # B×T×D
+        hB = self.encoderB(xB, session_idx=session_idx, mask=mask)  # B×T×D
 
         # Cross-attention for first pair
         m, _ = self.cross_attn(
@@ -67,9 +66,8 @@ class EncoderFusion(nn.Module):
         g = torch.sigmoid(self.gate(hA))  # B×T×1
         h = hA + g * m  # B×T×D
         h = self.norm(h)
-        h = self.projection(h)
+        h = self.projection(h, session_idx)
         h = F.normalize(h, dim=-1)
 
         return h
-
 
