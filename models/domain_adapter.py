@@ -7,10 +7,10 @@ class DomainAdapter(nn.Module):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Linear(input_dim, d_model),
-            nn.LayerNorm(d_model),
-            nn.ReLU(),
-            nn.Linear(d_model, d_model),
-            nn.LayerNorm(d_model)
+            # nn.LayerNorm(d_model),
+            # nn.ReLU(),
+            # nn.Linear(d_model, d_model),
+            # nn.LayerNorm(d_model)
         )
 
     def forward(self, x):

@@ -3,28 +3,6 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
-
-def js_divergence_loss(features: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Jensen-Shannon divergence of feature distributions within a batch.
-
-    The features from each sample are averaged over time and turned into
-    probability distributions with ``softmax``. The loss encourages all
-    sample distributions to match the batch mean distribution.
-
-    Args:
-        features: Tensor of shape ``(B, T, D)``.
-        eps: Small constant for numerical stability.
-
-    Returns:
-        Scalar JS divergence loss.
-    """
-    B = features.size(0)
-    probs = torch.softmax(features.mean(dim=1), dim=-1)
-    mean_prob = probs.mean(dim=0, keepdim=True)
-
-    kl_pm = (probs * (probs.add(eps).log() - mean_prob.add(eps).log())).sum(dim=-1).mean()
-    kl_mp = (mean_prob * (mean_prob.add(eps).log() - probs.add(eps).log())).sum(dim=-1).mean()
-    return 0.5 * (kl_pm + kl_mp)
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0
@@ -137,21 +115,20 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr, is_supervised=T
         crop_offset = torch.randint(low=-crop_eleft, high=T - crop_eright + 1, size=(B,), device=xA.device)
 
         xA_crop1 = take_per_row(xA, crop_offset + crop_eleft, crop_right - crop_eleft)
-        xA_crop1 = xA_crop1[:, -crop_l:]
         xB_crop1 = take_per_row(xB, crop_offset + crop_eleft, crop_right - crop_eleft)
-        xB_crop1 = xB_crop1[:, -crop_l:]
         xA_crop2 = take_per_row(xA, crop_offset + crop_left, crop_eright - crop_left)
-        xA_crop2 = xA_crop2[:, :crop_l]
         xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
-        xB_crop2 = xB_crop2[:, :crop_l]
+
 
         out1 = self.encoder_fusion(xA_crop1, xB_crop1)
+        out1 = out1[:, -crop_l:]
         out2 = self.encoder_fusion(xA_crop2, xB_crop2)
+        out2 = out2[:, :crop_l]
         #
-        # # ----- Step 3: jitter after encoding -----
-        # jitter_std = 0.01
-        # out1 = out1 + torch.randn_like(out1) * jitter_std
-        # out2 = out2 + torch.randn_like(out2) * jitter_std
+        # ----- Step 3: jitter after encoding -----
+        jitter_std = 0.01
+        out1 = out1 + torch.randn_like(out1) * jitter_std
+        out2 = out2 + torch.randn_like(out2) * jitter_std
 
         # ----- Step 4: main hierarchical contrastive loss -----
         loss_main = hierarchical_contrastive_loss(out1, out2, temporal_unit=self.temporal_unit)

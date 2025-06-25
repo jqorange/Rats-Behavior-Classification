@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from .encoder import Encoder  # unified modality encoder
 from .masking import generate_continuous_mask, generate_binomial_mask  # mask functions
-
+import torch.nn.functional as F
 
 class EncoderFusion(nn.Module):
 
@@ -28,6 +28,13 @@ class EncoderFusion(nn.Module):
         # LayerNorm for residual fusion
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
+        self.projection = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+            nn.LayerNorm(d_model),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, d_model)
+        )
 
     def forward(self, xA, xB):
         """
@@ -60,7 +67,8 @@ class EncoderFusion(nn.Module):
         g = torch.sigmoid(self.gate(hA))  # B×T×1
         h = hA + g * m  # B×T×D
         h = self.norm(h)
-        h = self.dropout(h)
+        h = self.projection(h)
+        h = F.normalize(h, dim=-1)
 
         return h
 

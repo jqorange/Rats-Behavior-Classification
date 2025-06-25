@@ -9,10 +9,12 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tqdm
 from models.losses import (
     compute_contrastive_losses,
-    js_divergence_loss,
+    CenterLoss,
+    PrototypeClusterLoss,
+    UncertaintyWeighting,
 )
 from models.fusion import EncoderFusion
-
+from models.classifier import MLPClassifier
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
 from utils.tools import take_per_row
 class FusionTrainer:
@@ -86,15 +88,29 @@ class FusionTrainer:
 
 
 
+        self.classifier = MLPClassifier(
+            input_dim=d_model,
+            hidden_dim=hidden_dim,
+            output_dim=num_classes
+        ).to(device)
 
         # Optimizers
         self.optimizer_encoder = torch.optim.AdamW(
             self.encoder_fusion.parameters(),
             lr=lr_encoder
         )
+        self.optimizer_classifier = torch.optim.AdamW(
+            self.classifier.parameters(),
+            lr=lr_classifier
+        )
 
+
+        self.loss_weighter = UncertaintyWeighting(num_losses=4)
+
+        # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
-
+        self.center_loss = CenterLoss(num_classes, d_model)
+        self.proto_loss = PrototypeClusterLoss(num_classes, d_model)
 
         self.n_epochs = 0
         self.n_iters = 0
@@ -177,7 +193,8 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'unsup': 0.0,
-                'js': 0.0,
+                'center_l': 0.0,
+                'proto_l': 0.0,
                 'total': 0.0,
             }
             n_batches = 0
@@ -213,11 +230,16 @@ class FusionTrainer:
                     if sup_loader is not None:
                         f_s = self.encoder_fusion(xA_s, xB_s)
 
-                    if stage == 'all'or stage == 'adapt':
+                    if stage == 'all':
                         sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
-                        js_loss = js_divergence_loss(f_s)
-                        loss = sup_loss + unsup_loss + js_loss
+                        center_l = self.center_loss(f_s, y_s)
+                        proto_l = self.proto_loss(f_u)
+                        loss = self.loss_weighter([sup_loss, unsup_loss, center_l, proto_l])
+                    elif stage == 'adapt':
+                        sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
+                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        loss = sup_loss + unsup_loss
                     else:
                         unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
                         loss = unsup_loss
@@ -233,11 +255,16 @@ class FusionTrainer:
                     self.optimizer_encoder.step()
 
                 # 记录
-                if stage == 'all' or stage == 'adapt':
+                if stage == 'all':
+                    epoch_losses['sup'] += sup_loss.item()
+                    epoch_losses['unsup'] += unsup_loss.item()
+                    epoch_losses['center_l'] += center_l.item()
+                    epoch_losses['proto_l'] += proto_l.item()
+                    epoch_losses['total'] += loss.item()
+                elif stage == 'adapt':
                     epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
                     epoch_losses['total'] += loss.item()
-                    epoch_losses['js'] += js_loss.item()
                 else:
                     epoch_losses['unsup'] += unsup_loss.item()
                     epoch_losses['total'] += loss.item()
@@ -251,8 +278,10 @@ class FusionTrainer:
 
             if verbose:
                 print(f"Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}")
-                if stage == 'all' or stage == 'adapt':
-                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, JS={epoch_losses['js']:.8f}")
+                if stage == 'all':
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Center={epoch_losses['center_l']:.8f}, Proto={epoch_losses['proto_l']:.8f}")
+                elif stage == 'adapt':
+                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}")
             self.n_epochs += 1
 
         return contrastive_losses
@@ -451,7 +480,7 @@ class FusionTrainer:
         assert test_data_A.shape[0] == test_data_B.shape[0] == test_labels.shape[0]
         assert test_data_A.shape[1] == test_data_B.shape[1]
 
-        all_losses = {'contrastive': []}
+        all_losses = {'contrastive': [], 'mlp': [], 'test_performance': []}
 
         for epoch in range(start_epoch, self.n_all):
             if verbose:
@@ -461,9 +490,6 @@ class FusionTrainer:
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
 
-                for enc in [self.encoder_fusion.encoderA, self.encoder_fusion.encoderB]:
-                    enc.set_stage("stage1")
-
                 if verbose:
                     print("[Stage1] Mixing sessions")
                 self.train_contrastive_multi_session(unsup_sessions, verbose=verbose)
@@ -471,11 +497,8 @@ class FusionTrainer:
             elif epoch < self.n_adapted:
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = False
-
-                for enc in [self.encoder_fusion.encoderA, self.encoder_fusion.encoderB]:
-                    enc.set_stage("stage2")
-                    for p in enc.pre_adapter.parameters():
-
+                for module in [self.encoder_fusion.encoderA.adapter, self.encoder_fusion.encoderB.adapter]:
+                    for p in module.parameters():
                         p.requires_grad = True
 
                 self.train_contrastive_phase(
@@ -492,8 +515,6 @@ class FusionTrainer:
             else:
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
-                for enc in [self.encoder_fusion.encoderA, self.encoder_fusion.encoderB]:
-                    enc.set_stage("stage2")
 
                 contrastive_losses = self.train_contrastive_phase(
                     train_data_A, train_data_B,
@@ -501,7 +522,11 @@ class FusionTrainer:
                     labels_sup, verbose, stage='all')
                 all_losses['contrastive'].extend(contrastive_losses)
 
-
+                mlp_losses, test_performance = self.train_mlp_phase(
+                    train_data_sup_A, train_data_sup_B, labels_sup,
+                    test_data_A, test_data_B, test_labels, verbose)
+                all_losses['mlp'].extend(mlp_losses)
+                all_losses['test_performance'].append(test_performance)
 
             if epoch % self.save_gap == 0:
                 self.save(epoch)
@@ -604,7 +629,7 @@ class FusionTrainer:
     def save(self, num):
         """Save the trained models"""
         torch.save(self.encoder_fusion.state_dict(), f"./{self.path_prefix}/encoder_{num}.pkl")
-
+        torch.save(self.classifier.state_dict(), f"./{self.path_prefix}/classifier_{num}.pkl")
 
     def load(self, num):
         """Load the trained models"""
