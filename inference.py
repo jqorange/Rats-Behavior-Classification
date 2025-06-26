@@ -18,7 +18,7 @@ def latest_checkpoint(path):
         if m:
             num = int(m.group(1))
             # latest = max(latest, num)
-            latest = 640
+            latest = 685
     return latest
 
 
@@ -57,8 +57,10 @@ def main(args):
         min_len = min(len(imu), len(dlc))
         imu = imu[:min_len].astype(np.float32)
         dlc = dlc[:min_len].astype(np.float32)
-
-        reps = trainer.encode_state1(imu, dlc, 3, pool=True)
+        if args.mode=="stage1":
+            reps = trainer.encode_state1(imu, dlc, 3, pool=True)
+        elif args.mode=="stage2":
+            reps = trainer.encode(imu, dlc, mode="align", pool=True)
         out_file = os.path.join(args.output_dir, f"{session}_repr.npy")
         np.save(out_file, reps)
         print(f"Saved {out_file} with shape {reps.shape}")
@@ -70,5 +72,6 @@ if __name__ == "__main__":
     parser.add_argument("--sessions", nargs="+", default=["F5D10_outdoor"], help="Session names")
     parser.add_argument("--checkpoint_dir", default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--output_dir", default="representations", help="Output directory")
+    parser.add_argument("--mode", default="stage2", help="Output directory")
     args = parser.parse_args()
     main(args)

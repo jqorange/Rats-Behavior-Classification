@@ -52,7 +52,40 @@ def temporal_contrastive_loss(z1, z2):
     loss = (logits[:, t, T + t - 1].mean() + logits[:, T + t, t].mean()) / 2
     return loss
 
+def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8):
+    """
+    Only attracts samples with high label overlap (positive Jaccard),
+    without pushing negatives apart.
+    """
+    B, T, D = z.shape
 
+    # Max-pool over time
+    z = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)  # (B, D)
+    z = F.normalize(z, dim=-1)
+
+    y = y.float()  # (B, N)
+
+    # Cosine similarity (B, B)
+    sim = torch.matmul(z, z.T) / temperature
+
+    # === Positive weights only ===
+    inter = torch.matmul(y, y.T)
+    union = (y.unsqueeze(1) + y.unsqueeze(0)).clamp(max=1).sum(-1)
+    jaccard = inter / (union + eps)  # (B, B)
+
+    # Mask out self-similarity
+    mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
+    sim = sim[mask].view(B, B - 1)
+    jaccard = jaccard[mask].view(B, B - 1)
+
+    # Only use jaccard as positive weights; ignore others
+    weights = jaccard / (jaccard.sum(dim=1, keepdim=True) + eps)
+
+    # === No softmax ===
+    pos_sim = (weights * sim).sum(dim=1)
+    loss = -pos_sim.mean()
+
+    return loss
 
 def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
     """
@@ -89,12 +122,15 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
     return loss
 
 
-def compute_contrastive_losses(self, xA, xB, labels, fused_repr,session_idx, is_supervised=True):
+def compute_contrastive_losses(self, xA, xB, labels, fused_repr,session_idx, is_supervised=True, stage=2):
     """Compute either supervised or unsupervised contrastive loss based on mode."""
 
     if is_supervised:
         # Use the entire sequence for supervised contrastive learning in stage 2
-        sup_loss = multilabel_supcon_loss_bt(fused_repr, labels)
+        if stage == 2:
+            sup_loss = positive_only_supcon_loss(fused_repr, labels)
+        else:
+            sup_loss = multilabel_supcon_loss_bt(fused_repr, labels)
         return sup_loss
 
     else:

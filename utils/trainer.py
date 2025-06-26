@@ -244,13 +244,13 @@ class FusionTrainer:
                         loss = sup_loss + unsup_loss
                     elif stage == 'adapt':
                         sup_loss = compute_contrastive_losses(
-                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True
+                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True, stage=2
                         )
                         unsup_loss = compute_contrastive_losses(
-                            self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
+                            self, xA_u, xB_u, None, f_u, id_u, is_supervised=False, stage=2
                         )
 
-                        loss = sup_loss + unsup_loss
+                        loss = 0.1*sup_loss + 0.9*unsup_loss
                     else:
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
@@ -575,7 +575,7 @@ class FusionTrainer:
 
         return
 
-    def encode(self, data_A, data_B,  batch_size=None, pool=False):
+    def encode(self, data_A, data_B, mode="align", batch_size=None, pool=False):
         """
         Encode data using the trained fusion model
 
@@ -598,6 +598,9 @@ class FusionTrainer:
         loader = DataLoader(dataset, batch_size=batch_size)
         self.encoder_fusion.mask_type = None
         self.encoder_fusion.eval()
+        self.encoder_fusion.encoderA.adapter.set_mode(mode)
+        self.encoder_fusion.encoderB.adapter.set_mode(mode)
+        self.encoder_fusion.projection.set_mode(mode)
 
         with torch.no_grad():
             outputs = []
