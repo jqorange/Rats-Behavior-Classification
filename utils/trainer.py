@@ -8,8 +8,7 @@ from collections import deque
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import tqdm
 from models.losses import (
-    compute_contrastive_losses,
-    batch_js_divergence,)
+    compute_contrastive_losses,)
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
@@ -250,8 +249,8 @@ class FusionTrainer:
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
                         )
-                        js_loss = batch_js_divergence(f_s.detach(), id_s)
-                        loss = sup_loss + unsup_loss + js_loss
+
+                        loss = sup_loss + unsup_loss
                     else:
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
@@ -508,13 +507,12 @@ class FusionTrainer:
                 self.train_contrastive_multi_session(unsup_sessions, verbose=verbose)
 
             elif epoch < self.n_adapted:
-                for param in self.encoder_fusion.parameters():
-                    param.requires_grad = False
-                for module in [self.encoder_fusion.encoderA.adapter, self.encoder_fusion.encoderB.adapter]:
-                    for p in module.parameters():
-                        p.requires_grad = True
+                if epoch == self.n_stable:
+                    self.init_stage2(unsup_sessions, train_data_A, train_data_B, train_ids,
+                                    train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                                    verbose=True)
 
-                self.train_contrastive_phase(
+                contrastive_losses = self.train_contrastive_phase(
                     train_data_A,
                     train_data_B,
                     train_ids,
@@ -526,7 +524,6 @@ class FusionTrainer:
                     stage="adapt",
                     unsup_by_session=unsup_sessions,
                 )
-
             else:
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
@@ -549,11 +546,9 @@ class FusionTrainer:
 
         return all_losses
 
-    def fit_stage2(self, unsup_sessions, train_data_A, train_data_B, train_ids,
+    def init_stage2(self, unsup_sessions, train_data_A, train_data_B, train_ids,
                    train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
                    verbose: bool = True):
-        """Stage2 training with new adapters and frozen backbone."""
-        import torch
 
         # Freeze entire model
         for p in self.encoder_fusion.parameters():
@@ -565,6 +560,11 @@ class FusionTrainer:
             for p in module.parameters():
                 p.requires_grad = True
 
+            # Ensure proper adapter modes for stage2
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
+        self.encoder_fusion.projection.set_mode("align")
+
         # Optimizer over adapters only
         self.optimizer_encoder = torch.optim.AdamW(
             list(self.encoder_fusion.encoderA.adapter.parameters()) +
@@ -572,21 +572,9 @@ class FusionTrainer:
             list(self.encoder_fusion.projection.parameters()),
             lr=self.optimizer_encoder.defaults['lr']
         )
+        self.load_stage2(self.n_stable)
 
-        contrastive_losses = self.train_contrastive_phase(
-            train_data_A,
-            train_data_B,
-            train_ids,
-            train_data_sup_A,
-            train_data_sup_B,
-            sup_ids,
-            labels_sup,
-            verbose,
-            stage="adapt",
-            unsup_by_session=unsup_sessions,
-        )
-
-        return contrastive_losses
+        return
 
     def encode(self, data_A, data_B,  batch_size=None, pool=False):
         """
@@ -838,8 +826,10 @@ class FusionTrainer:
                     if m.bias is not None:
                         torch.nn.init.zeros_(m.bias)
 
-        self.encoder_fusion.encoderA.adapter.set_mode("aware")
-        self.encoder_fusion.encoderB.adapter.set_mode("aware")
+        # Stage2 uses session-align adapters before each encoder and an
+        # alignment-only projection adapter without session embeddings.
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
         self.encoder_fusion.projection.set_mode("align")
 
         print(f"[INFO] Loaded stage1 weights for stage2 training from encoder_{num}.pkl")

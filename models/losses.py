@@ -196,26 +196,3 @@ class UncertaintyWeighting(nn.Module):
             weighted.append(precision * L + self.log_vars[i])
         return sum(weighted)
 
-def batch_js_divergence(features: torch.Tensor, session_ids: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Compute average JS divergence between session feature distributions."""
-    unique_sessions = session_ids.unique()
-    if unique_sessions.numel() <= 1:
-        return features.new_tensor(0.0)
-
-    probs = []
-    for s in unique_sessions:
-        mask = session_ids == s
-        feat = features[mask].mean(dim=(0, 1))
-        probs.append(torch.softmax(feat, dim=-1))
-
-    js = 0.0
-    count = 0
-    for i in range(len(probs)):
-        for j in range(i + 1, len(probs)):
-            p = probs[i]
-            q = probs[j]
-            m = 0.5 * (p + q)
-            js += 0.5 * (F.kl_div(p.log(), m, reduction="sum") + F.kl_div(q.log(), m, reduction="sum"))
-            count += 1
-
-    return js / max(count, 1)
