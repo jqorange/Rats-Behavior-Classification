@@ -9,7 +9,7 @@ from .domain_adapter import DomainAdapter
 class EncoderFusion(nn.Module):
 
     def __init__(self, N_feat_A, N_feat_B, mask_type=None, d_model=64, nhead=4,
-                 dropout=0.1, num_sessions: int = 0):
+                 dropout=0.1, num_sessions: int = 0, projection_mode: str = "aware"):
         super().__init__()
 
         # Single-modal encoders
@@ -33,7 +33,7 @@ class EncoderFusion(nn.Module):
         self.norm = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.projection = DomainAdapter(d_model, d_model, num_sessions=num_sessions, dropout=dropout)
-        self.projection.set_mode("aware")
+        self.projection.set_mode(projection_mode)
 
     def forward(self, xA, xB, session_idx=None):
         """

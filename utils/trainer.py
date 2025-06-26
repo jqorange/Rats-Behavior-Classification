@@ -39,7 +39,8 @@ class FusionTrainer:
             n_adapted=2,
             n_all=3,
             use_amp=False,
-            num_sessions=0
+            num_sessions=0,
+            projection_mode="aware"
     ):
         """
         Args:
@@ -57,6 +58,7 @@ class FusionTrainer:
             temporal_unit: Minimum unit for temporal contrast
             contrastive_epochs: Number of epochs for contrastive learning phase
             mlp_epochs: Number of epochs for MLP training phase
+            projection_mode: Adapter mode for the final projection layer
         """
         self.device = device
         self.batch_size = batch_size
@@ -70,6 +72,7 @@ class FusionTrainer:
         self.n_adapted = n_adapted
         self.n_all = n_all
         self.d_model = d_model
+        self.projection_mode = projection_mode
 
         # AMP settings
         self.use_amp = use_amp and torch.cuda.is_available()
@@ -83,6 +86,7 @@ class FusionTrainer:
             d_model=d_model,
             nhead=nhead,
             num_sessions=num_sessions,
+            projection_mode=projection_mode,
         ).to(device)
 
 
@@ -232,16 +236,26 @@ class FusionTrainer:
                         f_s = self.encoder_fusion(xA_s, xB_s, id_s)
 
                     if stage == 'all':
-                        sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
-                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        sup_loss = compute_contrastive_losses(
+                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True
+                        )
+                        unsup_loss = compute_contrastive_losses(
+                            self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
+                        )
                         loss = sup_loss + unsup_loss
                     elif stage == 'adapt':
-                        sup_loss = compute_contrastive_losses(self, xA_s, xB_s, y_s, f_s, is_supervised=True)
-                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        sup_loss = compute_contrastive_losses(
+                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True
+                        )
+                        unsup_loss = compute_contrastive_losses(
+                            self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
+                        )
                         js_loss = batch_js_divergence(f_s.detach(), id_s)
                         loss = sup_loss + unsup_loss + js_loss
                     else:
-                        unsup_loss = compute_contrastive_losses(self, xA_u, xB_u, None, f_u, is_supervised=False)
+                        unsup_loss = compute_contrastive_losses(
+                            self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
+                        )
                         loss = unsup_loss
 
                 # 反向更新
@@ -535,6 +549,49 @@ class FusionTrainer:
 
         return all_losses
 
+    def fit_stage2(self, unsup_sessions, train_data_A, train_data_B, train_ids,
+                   train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                   verbose: bool = True):
+        """Stage2 training with new adapters and frozen backbone."""
+        import torch
+
+        # Freeze entire model
+        for p in self.encoder_fusion.parameters():
+            p.requires_grad = False
+        # Enable adapters
+        for module in [self.encoder_fusion.encoderA.adapter,
+                       self.encoder_fusion.encoderB.adapter,
+                       self.encoder_fusion.projection]:
+            for p in module.parameters():
+                p.requires_grad = True
+        # Ensure proper adapter modes for stage2
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
+        self.encoder_fusion.projection.set_mode("align")
+
+        # Optimizer over adapters only
+        self.optimizer_encoder = torch.optim.AdamW(
+            list(self.encoder_fusion.encoderA.adapter.parameters()) +
+            list(self.encoder_fusion.encoderB.adapter.parameters()) +
+            list(self.encoder_fusion.projection.parameters()),
+            lr=self.optimizer_encoder.defaults['lr']
+        )
+
+        contrastive_losses = self.train_contrastive_phase(
+            train_data_A,
+            train_data_B,
+            train_ids,
+            train_data_sup_A,
+            train_data_sup_B,
+            sup_ids,
+            labels_sup,
+            verbose,
+            stage="adapt",
+            unsup_by_session=unsup_sessions,
+        )
+
+        return contrastive_losses
+
     def encode(self, data_A, data_B,  batch_size=None, pool=False):
         """
         Encode data using the trained fusion model
@@ -752,4 +809,44 @@ class FusionTrainer:
             print(f"[WARNING] Failed to load fusion parts: {e}")
 
         print(f"[INFO] Successfully loaded model from encoder_{num}.pkl")
+
+    def load_stage2(self, num):
+        """Load pretrained weights for stage 2 without adapters or input projections."""
+        import torch
+        state_path = f"./{self.path_prefix}/encoder_{num}.pkl"
+        state = torch.load(state_path, map_location="cpu")
+
+        # Load encoder body excluding adapters
+        try:
+            encA_state = {k: v for k, v in state['encoderA_rest'].items() if not k.startswith('adapter.')}
+            encB_state = {k: v for k, v in state['encoderB_rest'].items() if not k.startswith('adapter.')}
+            self.encoder_fusion.encoderA.load_state_dict(encA_state, strict=False)
+            self.encoder_fusion.encoderB.load_state_dict(encB_state, strict=False)
+        except Exception as e:
+            print(f"[WARNING] Failed to load encoder body: {e}")
+
+        # Load fusion modules
+        for part in ['cross_attn', 'gate', 'norm']:
+            try:
+                getattr(self.encoder_fusion, part).load_state_dict(state[part], strict=False)
+            except Exception as e:
+                print(f"[WARNING] Failed to load {part}: {e}")
+
+        # Reinitialize adapters for stage 2
+        for adapter in [self.encoder_fusion.encoderA.adapter,
+                        self.encoder_fusion.encoderB.adapter,
+                        self.encoder_fusion.projection]:
+            for m in adapter.modules():
+                if isinstance(m, torch.nn.Linear):
+                    torch.nn.init.xavier_uniform_(m.weight)
+                    if m.bias is not None:
+                        torch.nn.init.zeros_(m.bias)
+
+        # Stage2 uses session-align adapters before each encoder and an
+        # alignment-only projection adapter without session embeddings.
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
+        self.encoder_fusion.projection.set_mode("align")
+
+        print(f"[INFO] Loaded stage1 weights for stage2 training from encoder_{num}.pkl")
 
