@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 
 
-def _build_align_block(d_model, dropout=0.1):
+def _build_align_block(d_model, d_middle, dropout=0.1):
     return nn.Sequential(
-        nn.Linear(d_model, d_model),
+        nn.Linear(d_model, d_middle),
         nn.ReLU(),
-        nn.LayerNorm(d_model),
+        nn.LayerNorm(d_middle),
         nn.Dropout(dropout),
-        nn.Linear(d_model, d_model),
+        nn.Linear(d_middle, d_model),
     )
 
 class DomainAdapter(nn.Module):
@@ -24,10 +24,10 @@ class DomainAdapter(nn.Module):
         super().__init__()
         self.linear = nn.Linear(input_dim, d_model)
         self.session_embed = (
-            nn.Embedding(num_sessions, d_model) if num_sessions > 0 else None
+            nn.Embedding(num_sessions, d_model)
         )
-        self.align_block = _build_align_block(d_model, dropout)
-        self.aware_block = _build_align_block(d_model, dropout)
+        self.align_block = _build_align_block(d_model, 2*d_model, dropout)
+        self.aware_block = _build_align_block(d_model, 2*d_model, dropout)
         self.mode = "none"
 
     def set_mode(self, mode: str) -> None:

@@ -11,9 +11,9 @@ def main(resume=False):
     np.random.seed(42)
    # ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
     # 数据路径
-    data_path = r"D:\Homework\NLP project\ACC_DATA\ACC_DATA\TrainData"
+    data_path = r"D:\Jiaqi\Datasets\Rats\TrainData"
     save_path = r"./checkpoints"
-    session_name = ["F3D6_outdoor","F3D6_outdoor"]
+    session_name = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
     # 检查路径是否存在
     if not os.path.exists(data_path):
         print(f"❌ 数据路径不存在: {data_path}")
@@ -25,12 +25,12 @@ def main(resume=False):
         data_path,
         save_path,
         session_name,
-        N_feat_IMU=35,
-        N_feat_DLC=30,
+        N_feat_IMU=77,
+        N_feat_DLC=66,
         num_classes=12,
-        spilit_num=1,
+        spilit_num=5,
         device='auto',
-        max_samples_per_session=1000  # 限制每个session最多5万个样本，根据内存情况调整
+        max_samples_per_session=150000  # 限制每个session最多5万个样本，根据内存情况调整
     )
 
     # 训练参数
@@ -41,14 +41,14 @@ def main(resume=False):
         'hidden_dim': 4,
         'lr_encoder': 0.0001,
         'lr_classifier': 0.001,
-        'batch_size': 4,
+        'batch_size': 512,
         'contrastive_epochs': 1,
         'mlp_epochs': 1,
         'save_path': save_path,
         'save_gap': 5,
-        'n_stable': 1,
-        'n_adapted': 2,
-        'n_all': 3,
+        'n_stable': 10000,
+        'n_adapted': 20000,
+        'n_all': 30000,
         'use_amp': True
     }
 

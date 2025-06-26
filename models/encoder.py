@@ -13,6 +13,7 @@ class Encoder(nn.Module):
         # === Domain adapter ===
         self.adapter = DomainAdapter(N_feat, d_model, num_sessions=num_sessions, dropout=dropout)
         self.adapter.set_mode("none")
+        self.norm1 = nn.LayerNorm(d_model)
 
         # === Dilated TCN block ===
         self.tcn = DilatedConvEncoder(d_model, [d_model] * depth, kernel_size=3)
@@ -45,6 +46,7 @@ class Encoder(nn.Module):
 
         # === Domain adaptation ===
         h = self.adapter(x, session_idx=session_idx)  # (B, T, d_model)
+        h = self.norm1(h)
 
         # Apply mask (if any)
         if mask is not None:

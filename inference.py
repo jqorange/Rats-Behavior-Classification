@@ -18,7 +18,7 @@ def latest_checkpoint(path):
         if m:
             num = int(m.group(1))
             # latest = max(latest, num)
-            latest = 215
+            latest = 640
     return latest
 
 
@@ -29,13 +29,14 @@ def main(args):
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     trainer = FusionTrainer(
-        N_feat_A=35,
-        N_feat_B=30,
+        N_feat_A=77,
+        N_feat_B=66,
         num_classes=12,
         device=device,
-        batch_size=256,
+        batch_size=512,
         d_model=64,
         nhead=4,
+        num_sessions=5,
         hidden_dim=4,
         save_path=args.checkpoint_dir,
     )
@@ -57,7 +58,7 @@ def main(args):
         imu = imu[:min_len].astype(np.float32)
         dlc = dlc[:min_len].astype(np.float32)
 
-        reps = trainer.encode(imu, dlc, pool=True)
+        reps = trainer.encode_state1(imu, dlc, 3, pool=True)
         out_file = os.path.join(args.output_dir, f"{session}_repr.npy")
         np.save(out_file, reps)
         print(f"Saved {out_file} with shape {reps.shape}")
@@ -65,8 +66,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate representations for sessions")
-    parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_1", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F3D6_outdoor"], help="Session names")
+    parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData", help="Base data path")
+    parser.add_argument("--sessions", nargs="+", default=["F5D10_outdoor"], help="Session names")
     parser.add_argument("--checkpoint_dir", default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--output_dir", default="representations", help="Output directory")
     args = parser.parse_args()

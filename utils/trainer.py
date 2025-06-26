@@ -312,7 +312,7 @@ class FusionTrainer:
             epoch_losses = {'unsup': 0.0, 'total': 0.0}
             iters = [iter(l) for l in loaders]
 
-            for _ in range(total_batches):
+            for _ in tqdm.tqdm(range(total_batches)):
                 idx = np.random.randint(len(loaders))
                 try:
                     xA_u, xB_u, id_u = next(iters[idx])
@@ -535,7 +535,7 @@ class FusionTrainer:
 
         return all_losses
 
-    def encode(self, data_A, data_B, batch_size=None, pool=False):
+    def encode(self, data_A, data_B,  batch_size=None, pool=False):
         """
         Encode data using the trained fusion model
 
@@ -580,7 +580,51 @@ class FusionTrainer:
         self.encoder_fusion.train()
 
         return output.numpy()
+    def encode_state1(self, data_A, data_B, idx, batch_size=None, pool=False):
+        """
+                Encode data using the trained fusion model
 
+                Args:
+                    data_A: (N, T, feat_A) - Modality A data
+                    data_B: (N, T, feat_B) - Modality B data
+                    batch_size: Batch size for inference
+
+                Returns:
+                    If pool is False: fused representations (N, T, D)
+                    If pool is True:  pooled features (N, 2, D)
+                """
+        if batch_size is None:
+            batch_size = self.batch_size
+        dataset = TensorDataset(
+            torch.from_numpy(data_A).float(),
+            torch.from_numpy(data_B).float()
+        )
+        loader = DataLoader(dataset, batch_size=batch_size)
+        self.encoder_fusion.mask_type = None
+        self.encoder_fusion.eval()
+
+        with torch.no_grad():
+            outputs = []
+            for batch in loader:
+                xA, xB = batch
+                idxs = torch.full((len(xA),), idx, dtype=torch.long, device=self.device)
+                xA = xA.to(self.device)
+                xB = xB.to(self.device)
+
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    out = self.encoder_fusion(xA, xB, idxs)
+                if pool:
+                    # global max pooling
+                    global_feat = out.max(dim=1).values
+
+                    out = global_feat.view(-1, self.d_model)
+                outputs.append(out.cpu())
+
+            output = torch.cat(outputs, dim=0)
+
+        self.encoder_fusion.train()
+
+        return output.numpy()
     def predict(self, data_A, data_B, batch_size=None):
         """
         Make predictions using the trained model
@@ -652,19 +696,60 @@ class FusionTrainer:
 
     def load(self, num):
         """Load the saved model parts into encoder_fusion"""
-        state = torch.load(f"./{self.path_prefix}/encoder_{num}.pkl", map_location='cpu')
+        import torch
+        state_path = f"./{self.path_prefix}/encoder_{num}.pkl"
+        state = torch.load(state_path, map_location='cpu')
 
-        # === 加载 adapter 部分 ===
-        self.encoder_fusion.encoderA.adapter.load_state_dict(state['adapterA'])
-        self.encoder_fusion.encoderB.adapter.load_state_dict(state['adapterB'])
+        print(f"[INFO] Keys in loaded state_dict from {state_path}:")
+        for key in state.keys():
+            print(f"  - {key}: {type(state[key])}")
+
+        # === 打印 adapterA / adapterB keys ===
+        if 'adapterA' in state:
+            print(f"[DEBUG] adapterA keys: {list(state['adapterA'].keys())}")
+        if 'adapterB' in state:
+            print(f"[DEBUG] adapterB keys: {list(state['adapterB'].keys())}")
+
+        # === 加载 adapterA ===
+        try:
+            self.encoder_fusion.encoderA.adapter.load_state_dict(state['adapterA'], strict=False)
+            # 检查 session_embed 是否加载成功
+            if 'session_embed.weight' in state['adapterA']:
+                saved_shape = state['adapterA']['session_embed.weight'].shape
+                model_shape = self.encoder_fusion.encoderA.adapter.session_embed.weight.shape
+                print(f"[CHECK] session_embed.weight shape - saved: {saved_shape}, model: {model_shape}")
+                if saved_shape != model_shape:
+                    print("[WARNING] session_embed weight shape mismatch – may cause invalid memory access.")
+                else:
+                    print("[INFO] session_embed.weight successfully loaded.")
+            else:
+                print("[WARNING] session_embed.weight not found in adapterA checkpoint.")
+        except Exception as e:
+            print(f"[ERROR] Failed to load adapterA: {e}")
+
+        # === 加载 adapterB ===
+        try:
+            self.encoder_fusion.encoderB.adapter.load_state_dict(state['adapterB'], strict=False)
+        except Exception as e:
+            print(f"[ERROR] Failed to load adapterB: {e}")
 
         # === 加载 encoder 主体（不包括 adapter）===
-        self.encoder_fusion.encoderA.load_state_dict(state['encoderA_rest'], strict=False)
-        self.encoder_fusion.encoderB.load_state_dict(state['encoderB_rest'], strict=False)
+        try:
+            self.encoder_fusion.encoderA.load_state_dict(state['encoderA_rest'], strict=False)
+        except Exception as e:
+            print(f"[WARNING] Failed to load encoderA_rest: {e}")
+        try:
+            self.encoder_fusion.encoderB.load_state_dict(state['encoderB_rest'], strict=False)
+        except Exception as e:
+            print(f"[WARNING] Failed to load encoderB_rest: {e}")
 
         # === 加载跨模态融合部分 ===
-        self.encoder_fusion.cross_attn.load_state_dict(state['cross_attn'])
-        self.encoder_fusion.gate.load_state_dict(state['gate'])
-        self.encoder_fusion.norm.load_state_dict(state['norm'])
+        try:
+            self.encoder_fusion.cross_attn.load_state_dict(state['cross_attn'], strict=False)
+            self.encoder_fusion.gate.load_state_dict(state['gate'], strict=False)
+            self.encoder_fusion.norm.load_state_dict(state['norm'], strict=False)
+        except Exception as e:
+            print(f"[WARNING] Failed to load fusion parts: {e}")
 
         print(f"[INFO] Successfully loaded model from encoder_{num}.pkl")
+
