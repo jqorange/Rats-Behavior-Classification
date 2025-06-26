@@ -52,10 +52,21 @@ def temporal_contrastive_loss(z1, z2):
     loss = (logits[:, t, T + t - 1].mean() + logits[:, T + t, t].mean()) / 2
     return loss
 
-def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8):
+
+def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8, return_score=False):
     """
     Only attracts samples with high label overlap (positive Jaccard),
     without pushing negatives apart.
+    Output is a positive loss: lower means better alignment.
+
+    Args:
+        z: (B, T, D) - time series embeddings
+        y: (B, N)    - multi-label binary tags
+        return_score: whether to return alignment score (for logging)
+
+    Returns:
+        loss: positive scalar
+        score (optional): average alignment score in [0, 1]
     """
     B, T, D = z.shape
 
@@ -78,12 +89,15 @@ def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8):
     sim = sim[mask].view(B, B - 1)
     jaccard = jaccard[mask].view(B, B - 1)
 
-    # Only use jaccard as positive weights; ignore others
+    # Only use jaccard as positive weights
     weights = jaccard / (jaccard.sum(dim=1, keepdim=True) + eps)
 
-    # === No softmax ===
-    pos_sim = (weights * sim).sum(dim=1)
-    loss = -pos_sim.mean()
+    # Weighted positive-only similarity
+    pos_sim = (weights * sim).sum(dim=1)  # (B,)
+    score = pos_sim.mean()  # average alignment score
+
+    # Positive loss: lower = less aligned
+    loss = 1.0 - score
 
     return loss
 
