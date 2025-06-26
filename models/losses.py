@@ -217,23 +217,6 @@ class CenterLoss(nn.Module):
         return loss
 
 
-class PrototypeClusterLoss(nn.Module):
-    """Prototype driven cluster loss for unlabeled data."""
-
-    def __init__(self, num_prototypes: int, feat_dim: int):
-        super().__init__()
-        self.prototypes = nn.Parameter(torch.randn(num_prototypes, feat_dim))
-
-    def forward(self, features: torch.Tensor) -> torch.Tensor:
-        """Align features with closest prototypes."""
-        B, T, D = features.shape
-        feats = F.normalize(features.reshape(B * T, D), dim=-1)
-        protos = F.normalize(self.prototypes.to(features.device), dim=-1)  # 加这一行
-
-        sim = torch.matmul(feats, protos.t())  # (BT, P)
-        loss = -sim.max(dim=1)[0].mean()
-        return loss
-
 
 class UncertaintyWeighting(nn.Module):
     """Learnable uncertainty-based weighting for multiple losses."""

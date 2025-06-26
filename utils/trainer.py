@@ -663,11 +663,11 @@ class FusionTrainer:
                 )
                 all_losses['contrastive'].extend(contrastive_losses)
 
-                mlp_losses, test_performance = self.train_mlp_phase(
-                    train_data_sup_A, train_data_sup_B, labels_sup,
-                    test_data_A, test_data_B, test_labels, verbose)
-                all_losses['mlp'].extend(mlp_losses)
-                all_losses['test_performance'].append(test_performance)
+                # mlp_losses, test_performance = self.train_mlp_phase(
+                #     train_data_sup_A, train_data_sup_B, labels_sup,
+                #     test_data_A, test_data_B, test_labels, verbose)
+                # all_losses['mlp'].extend(mlp_losses)
+                # all_losses['test_performance'].append(test_performance)
 
             if epoch % self.save_gap == 0:
                 self.save(epoch)
@@ -722,7 +722,7 @@ class FusionTrainer:
         self.encoder_fusion.encoderB.adapter.set_mode("align")
         self.encoder_fusion.projection.set_mode("align")
 
-        self.load_stage3(self.n_stable)
+        self.load(self.n_adapted)
 
         return
 
@@ -886,7 +886,10 @@ class FusionTrainer:
             'cross_attn': self.encoder_fusion.cross_attn.state_dict(),
             'gate': self.encoder_fusion.gate.state_dict(),
             'norm': self.encoder_fusion.norm.state_dict(),
+            # 保存最终投影层
+            'projection': self.encoder_fusion.projection.state_dict(),
         }, f"./{self.path_prefix}/encoder_{num}.pkl")
+
 
     def load(self, num):
         """Load the saved model parts into encoder_fusion"""
@@ -942,6 +945,8 @@ class FusionTrainer:
             self.encoder_fusion.cross_attn.load_state_dict(state['cross_attn'], strict=False)
             self.encoder_fusion.gate.load_state_dict(state['gate'], strict=False)
             self.encoder_fusion.norm.load_state_dict(state['norm'], strict=False)
+            if 'projection' in state:
+                self.encoder_fusion.projection.load_state_dict(state['projection'], strict=False)
         except Exception as e:
             print(f"[WARNING] Failed to load fusion parts: {e}")
 
@@ -987,32 +992,4 @@ class FusionTrainer:
 
         print(f"[INFO] Loaded stage1 weights for stage2 training from encoder_{num}.pkl")
 
-
-    def load_stage3(self, num):
-        import torch
-        state_path = f"./{self.path_prefix}/encoder_{num}.pkl"
-        state = torch.load(state_path, map_location="cpu")
-
-        try:
-            encA_state = {k: v for k, v in state['encoderA_rest'].items()}
-            encB_state = {k: v for k, v in state['encoderB_rest'].items()}
-            self.encoder_fusion.encoderA.load_state_dict(encA_state, strict=False)
-            self.encoder_fusion.encoderB.load_state_dict(encB_state, strict=False)
-        except Exception as e:
-            print(f"[WARNING] Failed to load encoder body: {e}")
-
-        # Load fusion modules
-        for part in ['cross_attn', 'gate', 'norm']:
-            try:
-                getattr(self.encoder_fusion, part).load_state_dict(state[part], strict=False)
-            except Exception as e:
-                print(f"[WARNING] Failed to load {part}: {e}")
-
-        # Stage2 uses session-align adapters before each encoder and an
-        # alignment-only projection adapter without session embeddings.
-        self.encoder_fusion.encoderA.adapter.set_mode("align")
-        self.encoder_fusion.encoderB.adapter.set_mode("align")
-        self.encoder_fusion.projection.set_mode("align")
-
-        print(f"[INFO] Loaded stage1 weights for stage2 training from encoder_{num}.pkl")
 
