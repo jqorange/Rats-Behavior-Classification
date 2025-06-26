@@ -250,3 +250,53 @@ class UncertaintyWeighting(nn.Module):
             weighted.append(precision * L + self.log_vars[i])
         return sum(weighted)
 
+
+class PrototypeMemory(nn.Module):
+    """Maintain class prototypes and provide prototype-based loss."""
+
+    def __init__(self, num_classes: int, feat_dim: int):
+        super().__init__()
+        self.num_classes = num_classes
+        self.feat_dim = feat_dim
+        self.register_buffer("prototypes", torch.zeros(num_classes, feat_dim))
+        self.initialized = False
+
+    @torch.no_grad()
+    def assign_labels(self, feats: torch.Tensor) -> torch.Tensor:
+        """Assign pseudo labels based on cosine similarity to prototypes."""
+        feats = F.normalize(feats, dim=-1)
+        protos = F.normalize(self.prototypes, dim=-1)
+        sims = torch.matmul(feats, protos.t())
+        return sims.argmax(dim=1)
+
+    @torch.no_grad()
+    def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
+               feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
+        """Update prototypes using labeled and pseudo labeled features."""
+        new_protos = self.prototypes.clone()
+
+        if feats_sup is not None and labels_sup is not None:
+            for c in range(self.num_classes):
+                mask = labels_sup[:, c].bool()
+                if mask.any():
+                    new_protos[c] = feats_sup[mask].mean(0)
+
+        if feats_unsup is not None and pseudo is not None:
+            for c in range(self.num_classes):
+                mask = pseudo == c
+                if mask.any():
+                    feat_c = feats_unsup[mask].mean(0)
+                    if new_protos[c].abs().sum() == 0:
+                        new_protos[c] = feat_c
+                    else:
+                        new_protos[c] = 0.5 * (new_protos[c] + feat_c)
+
+        self.prototypes = F.normalize(new_protos, dim=-1)
+        self.initialized = True
+
+    def forward(self, feats: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        feats = F.normalize(feats, dim=-1)
+        protos = F.normalize(self.prototypes, dim=-1)
+        logits = torch.matmul(feats, protos.t())
+        return F.cross_entropy(logits, targets)
+

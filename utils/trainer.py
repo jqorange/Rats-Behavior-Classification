@@ -8,7 +8,9 @@ from collections import deque
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import tqdm
 from models.losses import (
-    compute_contrastive_losses,)
+    compute_contrastive_losses,
+    PrototypeMemory,
+)
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
@@ -111,7 +113,7 @@ class FusionTrainer:
 
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
-
+        self.prototype_memory = PrototypeMemory(num_classes, d_model)
 
         self.n_epochs = 0
         self.n_iters = 0
@@ -293,6 +295,128 @@ class FusionTrainer:
                     print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}")
                 elif stage == 'adapt':
                     print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, JS={epoch_losses['js']:.8f}")
+            self.n_epochs += 1
+
+        return contrastive_losses
+
+    def train_stage3(self, train_data_A, train_data_B, train_ids,
+                     train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                     verbose=True):
+        """Stage3 training with supervised, unsupervised and prototype losses."""
+
+        unsup_ds = TensorDataset(
+            torch.from_numpy(train_data_A).float(),
+            torch.from_numpy(train_data_B).float(),
+            torch.from_numpy(train_ids).long(),
+        )
+        unsup_loader = DataLoader(
+            unsup_ds,
+            batch_size=min(self.batch_size, len(unsup_ds)),
+            shuffle=True,
+            drop_last=True,
+        )
+
+        if train_data_sup_A is not None:
+            sup_ds = TensorDataset(
+                torch.from_numpy(train_data_sup_A).float(),
+                torch.from_numpy(train_data_sup_B).float(),
+                torch.from_numpy(labels_sup).long(),
+                torch.from_numpy(sup_ids).long(),
+            )
+            label_counts = labels_sup.sum(axis=0) + 1e-6
+            label_freq = label_counts / label_counts.sum()
+            sample_weights = (labels_sup @ (1.0 / label_freq)).astype(np.float32)
+            sampler = WeightedRandomSampler(sample_weights, len(sample_weights), replacement=True)
+            sup_loader = DataLoader(
+                sup_ds,
+                batch_size=min(self.batch_size, len(sup_ds)),
+                sampler=sampler,
+                drop_last=True,
+            )
+            sup_iter = iter(sup_loader)
+        else:
+            sup_loader = None
+
+        contrastive_losses = []
+
+        for epoch in range(self.contrastive_epochs):
+            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'proto': 0.0, 'total': 0.0}
+            unsup_iter = iter(unsup_loader)
+
+            for _ in tqdm.tqdm(range(len(unsup_loader)), desc=f'Stage3 Epoch {epoch+1}/{self.contrastive_epochs}'):
+                try:
+                    xA_u, xB_u, id_u = next(unsup_iter)
+                except StopIteration:
+                    unsup_iter = iter(unsup_loader)
+                    xA_u, xB_u, id_u = next(unsup_iter)
+
+                xA_u, xB_u, id_u = xA_u.to(self.device), xB_u.to(self.device), id_u.to(self.device)
+
+                if sup_loader is not None:
+                    try:
+                        xA_s, xB_s, y_s, id_s = next(sup_iter)
+                    except StopIteration:
+                        sup_iter = iter(sup_loader)
+                        xA_s, xB_s, y_s, id_s = next(sup_iter)
+                    xA_s, xB_s, y_s, id_s = xA_s.to(self.device), xB_s.to(self.device), y_s.to(self.device), id_s.to(self.device)
+                else:
+                    xA_s = xB_s = y_s = id_s = None
+
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    f_u = self.encoder_fusion(xA_u, xB_u, id_u)
+                    unsup_loss = compute_contrastive_losses(
+                        self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
+                    )
+
+                    if sup_loader is not None:
+                        f_s = self.encoder_fusion(xA_s, xB_s, id_s)
+                        sup_loss = compute_contrastive_losses(
+                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True, stage=3
+                        )
+                        pooled_s = f_s.max(dim=1).values
+                    else:
+                        sup_loss = torch.tensor(0.0, device=self.device)
+                        pooled_s = None
+
+                    pooled_u = f_u.max(dim=1).values
+
+                    if not self.prototype_memory.initialized and pooled_s is not None:
+                        self.prototype_memory.update(pooled_s.detach(), y_s.detach())
+
+                    pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
+                    proto_loss = self.prototype_memory(pooled_u, pseudo)
+
+                loss = sup_loss + unsup_loss + proto_loss
+
+                self.optimizer_encoder.zero_grad()
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer_encoder)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    self.optimizer_encoder.step()
+
+                with torch.no_grad():
+                    self.prototype_memory.update(pooled_s.detach() if pooled_s is not None else None,
+                                                y_s.detach() if pooled_s is not None else None,
+                                                pooled_u.detach(), pseudo)
+
+                epoch_losses['unsup'] += unsup_loss.item()
+                epoch_losses['proto'] += proto_loss.item()
+                epoch_losses['total'] += loss.item()
+                if sup_loader is not None:
+                    epoch_losses['sup'] += sup_loss.item()
+                self.n_iters += 1
+
+            for k in epoch_losses:
+                epoch_losses[k] /= len(unsup_loader)
+            contrastive_losses.append(epoch_losses)
+
+            if verbose:
+                print(
+                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}"
+                )
             self.n_epochs += 1
 
         return contrastive_losses
@@ -527,11 +651,11 @@ class FusionTrainer:
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
 
-                contrastive_losses = self.train_contrastive_phase(
+                contrastive_losses = self.train_stage3(
                     train_data_A, train_data_B, train_ids,
                     train_data_sup_A, train_data_sup_B,
-                    sup_ids,
-                    labels_sup, verbose, stage='all')
+                    sup_ids, labels_sup, verbose
+                )
                 all_losses['contrastive'].extend(contrastive_losses)
 
                 mlp_losses, test_performance = self.train_mlp_phase(
