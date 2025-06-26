@@ -174,7 +174,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot representations with evaluation")
     parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_1",
                         help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F5D10_outdoor"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
     args = parser.parse_args()
     main(args)

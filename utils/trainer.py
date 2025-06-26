@@ -252,7 +252,7 @@ class FusionTrainer:
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False, stage=2
                         )
 
-                        loss = 0.1*sup_loss + 0.9*unsup_loss
+                        loss = 0.01*sup_loss + 0.99*unsup_loss
                     else:
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
@@ -386,7 +386,7 @@ class FusionTrainer:
                     pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
                     proto_loss = self.prototype_memory(pooled_u, pseudo)
 
-                loss = sup_loss + unsup_loss + proto_loss
+                loss = 0.05*(sup_loss + proto_loss)+ 0.95*unsup_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -648,6 +648,11 @@ class FusionTrainer:
                     unsup_by_session=unsup_sessions,
                 )
             else:
+                if epoch == self.n_adapted + 1:
+                    self.init_stage3(unsup_sessions, train_data_A, train_data_B, train_ids,
+                                     train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                                     verbose=True)
+
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
 
@@ -696,6 +701,28 @@ class FusionTrainer:
             lr=self.optimizer_encoder.defaults['lr']
         )
         self.load_stage2(self.n_stable)
+
+        return
+    def init_stage3(self, unsup_sessions, train_data_A, train_data_B, train_ids,
+                   train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                   verbose: bool = True):
+
+        # Freeze entire model
+        for p in self.encoder_fusion.parameters():
+            p.requires_grad = True
+        # Enable adapters
+        for module in [self.encoder_fusion.encoderA.adapter,
+                       self.encoder_fusion.encoderB.adapter,
+                       self.encoder_fusion.projection]:
+            for p in module.parameters():
+                p.requires_grad = True
+
+            # Ensure proper adapter modes for stage2
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
+        self.encoder_fusion.projection.set_mode("align")
+
+        self.load_stage3(self.n_stable)
 
         return
 
@@ -951,6 +978,35 @@ class FusionTrainer:
                     torch.nn.init.xavier_uniform_(m.weight)
                     if m.bias is not None:
                         torch.nn.init.zeros_(m.bias)
+
+        # Stage2 uses session-align adapters before each encoder and an
+        # alignment-only projection adapter without session embeddings.
+        self.encoder_fusion.encoderA.adapter.set_mode("align")
+        self.encoder_fusion.encoderB.adapter.set_mode("align")
+        self.encoder_fusion.projection.set_mode("align")
+
+        print(f"[INFO] Loaded stage1 weights for stage2 training from encoder_{num}.pkl")
+
+
+    def load_stage3(self, num):
+        import torch
+        state_path = f"./{self.path_prefix}/encoder_{num}.pkl"
+        state = torch.load(state_path, map_location="cpu")
+
+        try:
+            encA_state = {k: v for k, v in state['encoderA_rest'].items()}
+            encB_state = {k: v for k, v in state['encoderB_rest'].items()}
+            self.encoder_fusion.encoderA.load_state_dict(encA_state, strict=False)
+            self.encoder_fusion.encoderB.load_state_dict(encB_state, strict=False)
+        except Exception as e:
+            print(f"[WARNING] Failed to load encoder body: {e}")
+
+        # Load fusion modules
+        for part in ['cross_attn', 'gate', 'norm']:
+            try:
+                getattr(self.encoder_fusion, part).load_state_dict(state[part], strict=False)
+            except Exception as e:
+                print(f"[WARNING] Failed to load {part}: {e}")
 
         # Stage2 uses session-align adapters before each encoder and an
         # alignment-only projection adapter without session embeddings.

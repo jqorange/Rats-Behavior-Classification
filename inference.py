@@ -69,7 +69,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate representations for sessions")
     parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F5D10_outdoor"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"], help="Session names")
     parser.add_argument("--checkpoint_dir", default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--output_dir", default="representations", help="Output directory")
     parser.add_argument("--mode", default="stage2", help="Output directory")

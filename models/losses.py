@@ -269,34 +269,69 @@ class PrototypeMemory(nn.Module):
         sims = torch.matmul(feats, protos.t())
         return sims.argmax(dim=1)
 
+
     @torch.no_grad()
     def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
                feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
-        """Update prototypes using labeled and pseudo labeled features."""
+        """Update prototypes using high-similarity labeled and pseudo labeled features."""
         new_protos = self.prototypes.clone()
-
+        current_protos = F.normalize(self.prototypes, dim=-1)  # (C, D)
+        # === Device Fix ===
+        device = feats_sup.device if feats_sup is not None else feats_unsup.device
+        current_protos = F.normalize(self.prototypes.to(device), dim=-1)
+        new_protos = self.prototypes.clone().to(device)
         if feats_sup is not None and labels_sup is not None:
+            feats_sup = F.normalize(feats_sup, dim=-1)
             for c in range(self.num_classes):
                 mask = labels_sup[:, c].bool()
                 if mask.any():
-                    new_protos[c] = feats_sup[mask].mean(0)
+                    feats_c = feats_sup[mask]
+                    sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
+                    high_sim_mask = sims > 0.9
+                    if high_sim_mask.any():
+                        new_protos[c] = feats_c[high_sim_mask].mean(0)
 
         if feats_unsup is not None and pseudo is not None:
+            feats_unsup = F.normalize(feats_unsup, dim=-1)
             for c in range(self.num_classes):
                 mask = pseudo == c
                 if mask.any():
-                    feat_c = feats_unsup[mask].mean(0)
-                    if new_protos[c].abs().sum() == 0:
-                        new_protos[c] = feat_c
-                    else:
-                        new_protos[c] = 0.5 * (new_protos[c] + feat_c)
+                    feats_c = feats_unsup[mask]
+                    sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
+                    high_sim_mask = sims > 0.9
+                    if high_sim_mask.any():
+                        feat_c = feats_c[high_sim_mask].mean(0)
+                        if new_protos[c].abs().sum() == 0:
+                            new_protos[c] = feat_c
+                        else:
+                            new_protos[c] = 0.5 * (new_protos[c] + feat_c)
 
         self.prototypes = F.normalize(new_protos, dim=-1)
         self.initialized = True
 
-    def forward(self, feats: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def forward(self, feats: torch.Tensor, targets: torch.Tensor, sim_thresh: float = 0.7) -> torch.Tensor:
+        """
+        feats: (B, D)
+        targets: (B,) - int64 class indices
+        sim_thresh: float - minimum similarity to prototype to be counted in loss
+        """
         feats = F.normalize(feats, dim=-1)
         protos = F.normalize(self.prototypes, dim=-1)
-        logits = torch.matmul(feats, protos.t())
-        return F.cross_entropy(logits, targets)
+
+        logits = torch.matmul(feats, protos.t())  # (B, C)
+
+        # Gather similarity to the true class
+        target_sims = logits[torch.arange(len(feats)), targets]  # (B,)
+
+        # Only keep samples with sim > threshold
+        mask = target_sims > sim_thresh
+        if mask.sum() == 0:
+            # No valid samples, return zero loss (safe default)
+            return feats.new_tensor(0.0, requires_grad=True)
+
+        # Filter inputs
+        filtered_logits = logits[mask]
+        filtered_targets = targets[mask]
+
+        return F.cross_entropy(filtered_logits, filtered_targets)
 

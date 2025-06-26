@@ -47,7 +47,7 @@ def main(resume=True):
         'save_path': save_path,
         'save_gap': 5,
         'n_stable': 680,
-        'n_adapted': 20000,
+        'n_adapted': 685,
         'n_all': 30000,
         'use_amp': True
     }
