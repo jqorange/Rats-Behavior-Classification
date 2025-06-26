@@ -89,12 +89,8 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr,session_idx, is_
     """Compute either supervised or unsupervised contrastive loss based on mode."""
 
     if is_supervised:
-        # Only use the center 11 frames for supervised contrastive learning
-        B, T, _ = fused_repr.shape
-        start = max(0, T // 2 - 5)
-        end = min(start + 11, T)
-        center_feat = fused_repr[:, start:end]
-        sup_loss = multilabel_supcon_loss_bt(center_feat, labels)
+        # Use the entire sequence for supervised contrastive learning in stage 2
+        sup_loss = multilabel_supcon_loss_bt(fused_repr, labels)
         return sup_loss
 
     else:
