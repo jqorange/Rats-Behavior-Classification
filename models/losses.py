@@ -58,25 +58,29 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
     """
     z: (B, T, D) - time series embeddings
     y: (B, N)    - multi-label binary tags
+    This version applies max pooling across time to reduce computation.
     """
     B, T, D = z.shape
+
+    # === Max Pooling across time dimension ===
+    z = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)  # (B, D)
     z = F.normalize(z, dim=-1)
-    z = z.reshape(B * T, D)  # (BT, D)
-    y = y.float().repeat_interleave(T, dim=0)  # (BT, N)
 
-    # Compute similarity
-    sim = torch.matmul(z, z.T) / temperature  # (BT, BT)
+    y = y.float()  # (B, N)
 
-    # Remove diagonal
-    logits_mask = ~torch.eye(B * T, dtype=torch.bool, device=z.device)
-    sim = sim[logits_mask].view(B * T, B * T - 1)
+    # Compute cosine similarity
+    sim = torch.matmul(z, z.T) / temperature  # (B, B)
 
-    # Compute Jaccard label similarity
-    inter = torch.matmul(y, y.T)  # (BT, BT)
-    union = (y.unsqueeze(1) + y.unsqueeze(0)).clamp(max=1).sum(-1)  # (BT, BT)
-    jaccard = inter / (union + eps)
+    # Remove diagonal (self-similarity)
+    logits_mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
+    sim = sim[logits_mask].view(B, B - 1)
 
-    jaccard_masked = jaccard[logits_mask].view(B * T, B * T - 1)
+    # Compute Jaccard similarity between labels
+    inter = torch.matmul(y, y.T)  # (B, B)
+    union = (y.unsqueeze(1) + y.unsqueeze(0)).clamp(max=1).sum(-1)
+    jaccard = inter / (union + eps)  # (B, B)
+
+    jaccard_masked = jaccard[logits_mask].view(B, B - 1)
     weights = jaccard_masked / (jaccard_masked.sum(dim=1, keepdim=True) + eps)
 
     log_prob = F.log_softmax(sim, dim=1)

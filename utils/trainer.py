@@ -153,8 +153,8 @@ class FusionTrainer:
             sup_ds = TensorDataset(
                 torch.from_numpy(train_data_sup_A).float(),
                 torch.from_numpy(train_data_sup_B).float(),
-                torch.from_numpy(train_ids).long(),
-                torch.from_numpy(labels_sup).long()
+                torch.from_numpy(labels_sup).long(),
+                torch.from_numpy(sup_ids).long()
             )
             label_counts = labels_sup.sum(axis=0) + 1e-6
             label_freq = label_counts / label_counts.sum()
@@ -275,7 +275,6 @@ class FusionTrainer:
                 elif stage == 'adapt':
                     epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
-                    epoch_losses['js'] += js_loss.item()
                     epoch_losses['total'] += loss.item()
                 else:
                     epoch_losses['unsup'] += unsup_loss.item()
@@ -507,7 +506,7 @@ class FusionTrainer:
                 self.train_contrastive_multi_session(unsup_sessions, verbose=verbose)
 
             elif epoch < self.n_adapted:
-                if epoch == self.n_stable:
+                if epoch == self.n_stable+1:
                     self.init_stage2(unsup_sessions, train_data_A, train_data_B, train_ids,
                                     train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
                                     verbose=True)

@@ -4,7 +4,7 @@ import os
 from utils.TrainPipline import TrainPipline
 import argparse
 
-def main(resume=False):
+def main(resume=True):
     """主函数"""
     # 设置随机种子
     torch.manual_seed(42)
@@ -46,7 +46,7 @@ def main(resume=False):
         'mlp_epochs': 1,
         'save_path': save_path,
         'save_gap': 5,
-        'n_stable': 10000,
+        'n_stable': 680,
         'n_adapted': 20000,
         'n_all': 30000,
         'use_amp': True
@@ -90,7 +90,7 @@ def main(resume=False):
 if __name__ == "__main__":
     success = main()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--resume', default=False, help='resume training from last checkpoint')
+    parser.add_argument('--resume', default=True, help='resume training from last checkpoint')
     args = parser.parse_args()
     success = main(resume=args.resume)
 
