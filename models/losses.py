@@ -256,13 +256,32 @@ class PrototypeMemory(nn.Module):
     @torch.no_grad()
     def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
                feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
-        """Update prototypes using high-similarity labeled and pseudo labeled features."""
-        new_protos = self.prototypes.clone()
-        current_protos = F.normalize(self.prototypes, dim=-1)  # (C, D)
-        # === Device Fix ===
-        device = feats_sup.device if feats_sup is not None else feats_unsup.device
-        current_protos = F.normalize(self.prototypes.to(device), dim=-1)
+        """Update prototypes using labeled data and high-similarity pseudo labeled features."""
+
+        # === Determine device ===
+        device = None
+        if feats_sup is not None:
+            device = feats_sup.device
+        elif feats_unsup is not None:
+            device = feats_unsup.device
+        else:
+            return
+
         new_protos = self.prototypes.clone().to(device)
+
+        # ---- Initialization ----
+        if not self.initialized:
+            if feats_sup is not None and labels_sup is not None:
+                feats_sup = F.normalize(feats_sup, dim=-1)
+                for c in range(self.num_classes):
+                    mask = labels_sup[:, c].bool()
+                    if mask.any():
+                        new_protos[c] = feats_sup[mask].mean(0)
+            self.prototypes = F.normalize(new_protos, dim=-1)
+            self.initialized = True
+            return
+
+        current_protos = F.normalize(self.prototypes.to(device), dim=-1)
         if feats_sup is not None and labels_sup is not None:
             feats_sup = F.normalize(feats_sup, dim=-1)
             for c in range(self.num_classes):

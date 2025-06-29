@@ -8,7 +8,7 @@ from models.deep_mlp import DeepMLPClassifier
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
     "still", "eating", "grooming", "local_search", "turn_left",
-    "turn_right", "not_in_frame", "unknown",
+    "turn_right",
 ]
 
 
@@ -53,7 +53,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Predict using trained MLP on representations")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
-    parser.add_argument("--model_path", default="checkpoints_classifier/mlp_repr_6.pt", help="Trained model path")
+    parser.add_argument("--model_path", default="checkpoints_classifier/mlp_repr_5.pt", help="Trained model path")
     parser.add_argument("--output_dir", default="predictions", help="Where to save predictions")
     args = parser.parse_args()
     main(args)

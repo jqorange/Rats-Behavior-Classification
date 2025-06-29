@@ -9,7 +9,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
     "still", "eating", "grooming", "local_search", "turn_left",
-    "turn_right", "not_in_frame", "unknown",
+    "turn_right",
 ]
 
 def load_valid_segments(results_path: str) -> dict:
@@ -122,8 +122,8 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate model only on labeled segments")
     parser.add_argument("--rep_dir", default="./representations", help="Representation directory")
-    parser.add_argument("--label_path", default="D:/Homework/NLP project/ACC_DATA/ACC_DATA/TrainData/labels", help="Path to label root directory")
-    parser.add_argument("--model_path", default="checkpoints_classifier/mlp_repr_6.pt", help="Trained model path")
+    parser.add_argument("--label_path", default="D:\Jiaqi\Datasets\Rats\TrainData/labels", help="Path to label root directory")
+    parser.add_argument("--model_path", default="checkpoints_classifier/mlp_repr_5.pt", help="Trained model path")
     parser.add_argument("--output_dir", default="predictions_segment_eval", help="Where to save predictions and evaluation")
     args = parser.parse_args()
     main(args)

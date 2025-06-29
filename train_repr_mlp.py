@@ -12,7 +12,7 @@ from models.deep_mlp import DeepMLPClassifier
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
     "still", "eating", "grooming", "local_search", "turn_left",
-    "turn_right", "not_in_frame", "unknown",
+    "turn_right",
 ]
 
 
@@ -145,7 +145,7 @@ def pseudo_label(model, data, threshold, batch_size, device):
 def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, device):
     pseudo_x_total = np.empty((0, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
-    thresholds = np.linspace(0.95, 0.4, 10)
+    thresholds = np.linspace(0.95, 0.6, 10)
     model = None
     for i, thr in enumerate(thresholds):
         print(f"\n=== Iteration {i+1}/10 | Threshold {thr:.2f} ===")
@@ -156,7 +156,7 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, d
         model = DeepMLPClassifier(input_dim, output_dim=len(LABEL_COLUMNS)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
         criterion = nn.BCEWithLogitsLoss()
-        for epoch in tqdm.tqdm(range(20)):
+        for epoch in tqdm.tqdm(range(50)):
             model.train()
             for x, y in train_loader:
                 x = x.to(device)
@@ -195,9 +195,9 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Self-training MLP on representations")
     parser.add_argument("--rep_dir", default="./representations", help="Representation directory")
-    parser.add_argument("--label_path", default="D:/Homework/NLP project/ACC_DATA/ACC_DATA/TrainData/labels", help="Path to labels directory")
-    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"])
-    parser.add_argument("--test_sessions", nargs="+", default=["F6D5_outdoor_2"])
+    parser.add_argument("--label_path", default="D:\Jiaqi\Datasets\Rats\TrainData/labels", help="Path to labels directory")
+    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"])
+    parser.add_argument("--test_sessions", nargs="+", default=["F6D5_outdoor_1"])
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)

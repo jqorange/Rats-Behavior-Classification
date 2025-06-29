@@ -13,7 +13,7 @@ def main(resume=True):
     # 数据路径
     data_path = r"D:\Jiaqi\Datasets\Rats\TrainData"
     save_path = r"./checkpoints"
-    session_name = ["F3D5_outdoor", "F3D6_outdoor"]
+    session_name = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
     # 检查路径是否存在
     if not os.path.exists(data_path):
         print(f"❌ 数据路径不存在: {data_path}")
@@ -28,7 +28,7 @@ def main(resume=True):
         N_feat_IMU=77,
         N_feat_DLC=66,
         num_classes=12,
-        spilit_num=1,
+        spilit_num=5,
         device='auto',
         max_samples_per_session=150000  # 限制每个session最多5万个样本，根据内存情况调整
     )
