@@ -7,7 +7,8 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import f1_score
 import tqdm
-from models.deep_mlp import DeepMLPClassifier
+from models.temporal_classifier import TemporalClassifier
+from utils.context import create_context_windows
 
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
@@ -33,6 +34,7 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     lab_file = os.path.join(label_dir, session, f"label_{session}.csv")
     reps = np.load(rep_file)
+    reps = create_context_windows(reps)
     labels = pd.read_csv(lab_file)
     labels = labels[LABEL_COLUMNS].values
     labels = np.argmax(labels, axis=1)  # 单标签分类
@@ -53,6 +55,7 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
 def load_unlabeled_data(rep_dir: str, session: str, segments=None):
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     reps = np.load(rep_file)
+    reps = create_context_windows(reps)
     if segments:
         labeled_idx = []
         for s, e in segments:
@@ -79,7 +82,7 @@ def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs):
     if unlabeled_x:
         unlabeled_x = np.concatenate(unlabeled_x, axis=0)
     else:
-        unlabeled_x = np.empty((0, train_x.shape[1]), dtype=np.float32)
+        unlabeled_x = np.empty((0, train_x.shape[1], train_x.shape[2]), dtype=np.float32)
 
     test_x, test_y = [], []
     for s in test_sessions:
@@ -112,7 +115,11 @@ def evaluate(model, loader, device):
 
 def pseudo_label(model, data, threshold, batch_size, device):
     if len(data) == 0:
-        return np.empty((0, data.shape[1]), dtype=np.float32), np.empty((0,), dtype=np.int64), data
+        return (
+            np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32),
+            np.empty((0,), dtype=np.int64),
+            data,
+        )
     dataset = TensorDataset(torch.from_numpy(data))
     loader = DataLoader(dataset, batch_size=batch_size)
     keep_indices = []
@@ -136,14 +143,14 @@ def pseudo_label(model, data, threshold, batch_size, device):
         remaining_mask[keep_indices] = False
         remaining = data[remaining_mask]
     else:
-        pseudo_x = np.empty((0, data.shape[1]), dtype=np.float32)
+        pseudo_x = np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32)
         pseudo_y = np.empty((0,), dtype=np.int64)
         remaining = data
     return pseudo_x, pseudo_y, remaining
 
 
 def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, device):
-    pseudo_x_total = np.empty((0, input_dim), dtype=np.float32)
+    pseudo_x_total = np.empty((0, 25, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0,), dtype=np.int64)
     thresholds = np.linspace(0.95, 0.6, 5)
     model = None
@@ -153,7 +160,7 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, d
         combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
         train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-        model = DeepMLPClassifier(input_dim, output_dim=len(LABEL_COLUMNS)).to(device)
+        model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
         criterion = nn.CrossEntropyLoss()
         for epoch in tqdm.tqdm(range(20)):
@@ -183,7 +190,7 @@ def main(args):
     train_x, train_y, unlabeled_x, test_x, test_y = build_datasets(
         args.train_sessions, args.test_sessions, args.rep_dir, args.label_path, segs
     )
-    input_dim = train_x.shape[1]
+    input_dim = train_x.shape[2]
     test_ds = TensorDataset(torch.from_numpy(test_x), torch.from_numpy(test_y))
     test_loader = DataLoader(test_ds, batch_size=args.batch_size)
     device = "cuda" if torch.cuda.is_available() else "cpu"

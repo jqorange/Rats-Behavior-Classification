@@ -3,7 +3,8 @@ import argparse
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
-from models.deep_mlp import DeepMLPClassifier
+from models.temporal_classifier import TemporalClassifier
+from utils.context import create_context_windows
 import pandas as pd
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
@@ -15,6 +16,7 @@ LABEL_COLUMNS = [
 def load_representation(rep_dir: str, session: str):
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     reps = np.load(rep_file)
+    reps = create_context_windows(reps)
     return reps.astype(np.float32)
 
 
@@ -25,7 +27,7 @@ def run_inference(model_path: str, rep_dir: str, session: str, output_dir: str, 
     loader = DataLoader(dataset, batch_size=256)
 
     # Load model
-    model = DeepMLPClassifier(input_dim=input_dim, output_dim=len(LABEL_COLUMNS))
+    model = TemporalClassifier(input_dim=input_dim, num_classes=len(LABEL_COLUMNS))
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
@@ -65,7 +67,7 @@ def main(args):
     sessions = args.sessions
     for session in sessions:
         reps = load_representation(args.rep_dir, session)
-        input_dim = reps.shape[1]
+        input_dim = reps.shape[2]
 
         run_inference(
             model_path=args.model_path,

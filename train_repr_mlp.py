@@ -7,7 +7,8 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import f1_score
 import tqdm
-from models.deep_mlp import DeepMLPClassifier
+from models.temporal_classifier import TemporalClassifier
+from utils.context import create_context_windows
 
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
@@ -33,6 +34,7 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     lab_file = os.path.join(label_dir, session, f"label_{session}.csv")
     reps = np.load(rep_file)
+    reps = create_context_windows(reps)
     labels = pd.read_csv(lab_file)
     labels = labels[LABEL_COLUMNS].values
     if len(labels) > len(reps):
@@ -52,6 +54,7 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
 def load_unlabeled_data(rep_dir: str, session: str, segments=None):
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     reps = np.load(rep_file)
+    reps = create_context_windows(reps)
     if segments:
         labeled_idx = []
         for s, e in segments:
@@ -78,7 +81,7 @@ def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs):
     if unlabeled_x:
         unlabeled_x = np.concatenate(unlabeled_x, axis=0)
     else:
-        unlabeled_x = np.empty((0, train_x.shape[1]), dtype=np.float32)
+        unlabeled_x = np.empty((0, train_x.shape[1], train_x.shape[2]), dtype=np.float32)
 
     test_x, test_y = [], []
     for s in test_sessions:
@@ -112,7 +115,11 @@ def evaluate(model, loader, device):
 
 def pseudo_label(model, data, threshold, batch_size, device):
     if len(data) == 0:
-        return np.empty((0, data.shape[1]), dtype=np.float32), np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32), data
+        return (
+            np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32),
+            np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32),
+            data,
+        )
     dataset = TensorDataset(torch.from_numpy(data))
     loader = DataLoader(dataset, batch_size=batch_size)
     keep_indices = []
@@ -136,14 +143,14 @@ def pseudo_label(model, data, threshold, batch_size, device):
         remaining_mask[keep_indices] = False
         remaining = data[remaining_mask]
     else:
-        pseudo_x = np.empty((0, data.shape[1]), dtype=np.float32)
+        pseudo_x = np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32)
         pseudo_y = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
         remaining = data
     return pseudo_x, pseudo_y, remaining
 
 
-def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, device):
-    pseudo_x_total = np.empty((0, input_dim), dtype=np.float32)
+def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, args, device):
+    pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
     thresholds = np.linspace(0.95, 0.6, 10)
     model = None
@@ -153,7 +160,7 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, d
         combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
         train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-        model = DeepMLPClassifier(input_dim, output_dim=len(LABEL_COLUMNS)).to(device)
+        model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
         criterion = nn.BCEWithLogitsLoss()
         for epoch in tqdm.tqdm(range(50)):
@@ -183,17 +190,18 @@ def main(args):
     train_x, train_y, unlabeled_x, test_x, test_y = build_datasets(
         args.train_sessions, args.test_sessions, args.rep_dir, args.label_path, segs
     )
-    input_dim = train_x.shape[1]
+    window_size = train_x.shape[1]
+    input_dim = train_x.shape[2]
     test_ds = TensorDataset(torch.from_numpy(test_x), torch.from_numpy(test_y))
     test_loader = DataLoader(test_ds, batch_size=args.batch_size)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.model_dir, exist_ok=True)
-    model = self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, args, device)
+    model = self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, args, device)
     torch.save(model.state_dict(), os.path.join(args.model_dir, "mlp_repr.pt"))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Self-training MLP on representations")
+    parser = argparse.ArgumentParser(description="Self-training temporal classifier on representations")
     parser.add_argument("--rep_dir", default="./representations", help="Representation directory")
     parser.add_argument("--label_path", default="D:\Jiaqi\Datasets\Rats\TrainData/labels", help="Path to labels directory")
     parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"])
