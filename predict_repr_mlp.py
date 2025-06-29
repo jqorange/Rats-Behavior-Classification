@@ -3,7 +3,8 @@ import argparse
 import numpy as np
 import pandas as pd
 import torch
-from models.deep_mlp import DeepMLPClassifier
+from models.temporal_classifier import TemporalClassifier
+from utils.context import create_context_windows
 
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
@@ -13,7 +14,7 @@ LABEL_COLUMNS = [
 
 
 def load_model(model_path: str, input_dim: int, device: str):
-    model = DeepMLPClassifier(input_dim, output_dim=len(LABEL_COLUMNS))
+    model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS))
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
     model.eval()
@@ -29,14 +30,16 @@ def main(args):
 
     # Use first file to infer input dimension
     example = np.load(os.path.join(args.rep_dir, session_files[0]))
-    input_dim = example.shape[1]
+    example = create_context_windows(example)
+    input_dim = example.shape[2]
 
     model = load_model(args.model_path, input_dim, device)
     os.makedirs(args.output_dir, exist_ok=True)
 
     for file in session_files:
         session = file.replace("_repr.npy", "")
-        reps = np.load(os.path.join(args.rep_dir, file)).astype(np.float32)
+        reps = np.load(os.path.join(args.rep_dir, file))
+        reps = create_context_windows(reps).astype(np.float32)
         with torch.no_grad():
             logits = model(torch.from_numpy(reps).to(device)).cpu().numpy()
             preds = 1 / (1 + np.exp(-logits))
@@ -51,7 +54,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Predict using trained MLP on representations")
+    parser = argparse.ArgumentParser(description="Predict using trained temporal classifier on representations")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
     parser.add_argument("--model_path", default="checkpoints_classifier/mlp_repr_5.pt", help="Trained model path")
     parser.add_argument("--output_dir", default="predictions", help="Where to save predictions")
