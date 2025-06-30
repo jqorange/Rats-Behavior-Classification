@@ -378,15 +378,15 @@ class FusionTrainer:
                         sup_loss = torch.tensor(0.0, device=self.device)
                         pooled_s = None
 
-                    # pooled_u = f_u.max(dim=1).values
-                    #
-                    # if not self.prototype_memory.initialized and pooled_s is not None:
-                    #     self.prototype_memory.update(pooled_s.detach(), y_s.detach())
-                    #
-                    # pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
-                    # proto_loss = self.prototype_memory(pooled_u, pseudo)
+                    pooled_u = f_u.max(dim=1).values
 
-                loss = 0.7*sup_loss + 0.3*unsup_loss#+ 0.1*proto_loss
+                    if not self.prototype_memory.initialized and pooled_s is not None:
+                        self.prototype_memory.update(pooled_s.detach(), y_s.detach())
+
+                    pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
+                    proto_loss = self.prototype_memory(pooled_u, pseudo)
+
+                loss = 0.1*sup_loss+0.7*unsup_loss+0.2*proto_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -397,13 +397,14 @@ class FusionTrainer:
                     loss.backward()
                     self.optimizer_encoder.step()
 
-                # with torch.no_grad():
-                #     self.prototype_memory.update(pooled_s.detach() if pooled_s is not None else None,
-                #                                 y_s.detach() if pooled_s is not None else None,
-                #                                 pooled_u.detach(), pseudo)
+
+                with torch.no_grad():
+                    self.prototype_memory.update(pooled_s.detach() if pooled_s is not None else None,
+                                                y_s.detach() if pooled_s is not None else None,
+                                                pooled_u.detach(), pseudo)
 
                 epoch_losses['unsup'] += unsup_loss.item()
-                # epoch_losses['proto'] += proto_loss.item()
+                epoch_losses['proto'] += proto_loss.item()
                 epoch_losses['total'] += loss.item()
                 if sup_loader is not None:
                     epoch_losses['sup'] += sup_loss.item()
