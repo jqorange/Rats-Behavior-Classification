@@ -3,7 +3,7 @@
 
 This project classifies laboratory rat behaviors from multimodal inputs. It contains the full training pipeline, inference scripts and tools for visualizing latent-space embeddings.
 
-Web Link: https://jqorange.github.io/Rats_Behavior_Classification/
+Web Link: [https://jqorange.github.io/Rats_Behavior_Classification/](https://jqorange.github.io/Rats-Behavior-Classification/)
 
 ![Latent space example](./figures/representation.png)
 
