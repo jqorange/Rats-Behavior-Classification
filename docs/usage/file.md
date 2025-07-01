@@ -5,7 +5,7 @@
 * **train.py** – launches the full training pipeline defined in `utils/TrainPipline`.
 * **inference.py** – loads checkpoints and produces latent representations for selected sessions.
 * **plot_embeddings.py** – visualise representations with PCA.
-* **evaluate.py** – evaluate the trained classifier on labelled CSV files.
+* **evaluate.py** – compute metrics for prediction CSVs on labelled frames.
 * **multi_class_classifier.py** / **train_repr_mlp.py** – utilities for self training a representation‑level MLP.
 * **multi_class_inference.py** – run the saved MLP and output probabilities.
 * **predict_repr_mlp.py** – inference using a MLP trained on representations.

@@ -22,8 +22,8 @@ python inference.py --data_path <path_to_dataset> --sessions F3D5_outdoor F3D6_o
 python plot_embeddings.py --rep_dir representations --sessions F3D5_outdoor
 ```
 
-6. Evaluate the trained MLP on labelled segments:
+6. Evaluate predictions on the labelled segments:
 
 ```bash
-python evaluate.py --rep_dir representations --label_path <labels>
+python evaluate.py --pred_dir predictions --label_path <labels>
 ```
