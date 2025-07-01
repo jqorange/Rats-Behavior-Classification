@@ -66,30 +66,58 @@ def load_unlabeled_data(rep_dir: str, session: str, segments=None):
     return reps.astype(np.float32)
 
 
-def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs):
-    train_x, train_y = [], []
+def _split_test_frames(reps: np.ndarray, labels: np.ndarray, n: int):
+    """Split out the first ``n`` frames for each class.
+
+    Returns training and remaining sets.
+    """
+    num_classes = labels.shape[1]
+    add_indices = []
+    for c in range(num_classes):
+        cls_idx = np.nonzero(labels[:, c] == 1)[0]
+        if len(cls_idx) > 0:
+            add_indices.extend(cls_idx[:n])
+    add_indices = np.unique(add_indices)
+    mask = np.ones(len(labels), dtype=bool)
+    mask[add_indices] = False
+    train_reps = reps[add_indices]
+    train_labels = labels[add_indices]
+    remain_reps = reps[mask]
+    remain_labels = labels[mask]
+    return train_reps, train_labels, remain_reps, remain_labels
+
+
+def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs, frames_per_class=150):
+    train_x_list, train_y_list = [], []
     unlabeled_x = []
     for s in train_sessions:
         reps, labels = load_session_data(rep_dir, label_dir, s, segs.get(s))
-        train_x.append(reps)
-        train_y.append(labels)
+        train_x_list.append(reps)
+        train_y_list.append(labels)
         u = load_unlabeled_data(rep_dir, s, segs.get(s))
         if len(u) > 0:
             unlabeled_x.append(u)
-    train_x = np.concatenate(train_x, axis=0)
-    train_y = np.concatenate(train_y, axis=0)
+
     if unlabeled_x:
         unlabeled_x = np.concatenate(unlabeled_x, axis=0)
     else:
-        unlabeled_x = np.empty((0, train_x.shape[1], train_x.shape[2]), dtype=np.float32)
+        sample_shape = train_x_list[0].shape
+        unlabeled_x = np.empty((0, sample_shape[1], sample_shape[2]), dtype=np.float32)
 
     test_x, test_y = [], []
     for s in test_sessions:
         reps, labels = load_session_data(rep_dir, label_dir, s, segs.get(s))
+        add_x, add_y, reps, labels = _split_test_frames(reps, labels, frames_per_class)
+        if len(add_x) > 0:
+            train_x_list.append(add_x)
+            train_y_list.append(add_y)
         test_x.append(reps)
         test_y.append(labels)
     test_x = np.concatenate(test_x, axis=0)
     test_y = np.concatenate(test_y, axis=0)
+
+    train_x = np.concatenate(train_x_list, axis=0)
+    train_y = np.concatenate(train_y_list, axis=0)
 
     return train_x, train_y, unlabeled_x, test_x, test_y
 
@@ -188,7 +216,12 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_
 def main(args):
     segs = load_valid_segments(os.path.join(args.label_path, "results.txt"))
     train_x, train_y, unlabeled_x, test_x, test_y = build_datasets(
-        args.train_sessions, args.test_sessions, args.rep_dir, args.label_path, segs
+        args.train_sessions,
+        args.test_sessions,
+        args.rep_dir,
+        args.label_path,
+        segs,
+        args.frames_per_class,
     )
     window_size = train_x.shape[1]
     input_dim = train_x.shape[2]
@@ -209,5 +242,11 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--frames_per_class",
+        type=int,
+        default=150,
+        help="Number of initial frames per class from test sessions to use for training",
+    )
     args = parser.parse_args()
     main(args)
