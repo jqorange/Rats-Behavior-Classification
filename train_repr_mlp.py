@@ -177,20 +177,27 @@ def pseudo_label(model, data, threshold, batch_size, device):
     return pseudo_x, pseudo_y, remaining
 
 
-def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, args, device):
+def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, input_dim, window_size, args, device):
+    """Self-training loop with additional pseudo labeling of test data."""
+
     pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
     thresholds = np.linspace(0.95, 0.6, 10)
     model = None
+
     for i, thr in enumerate(thresholds):
         print(f"\n=== Iteration {i+1}/10 | Threshold {thr:.2f} ===")
+
         combined_x = np.concatenate([train_x, pseudo_x_total], axis=0)
         combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
+
         train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+
         model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
         criterion = nn.BCEWithLogitsLoss()
+
         for epoch in tqdm.tqdm(range(50)):
             model.train()
             for x, y in train_loader:
@@ -201,15 +208,61 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_
                 loss = criterion(out, y)
                 loss.backward()
                 opt.step()
+
         acc, f1 = evaluate(model, test_loader, device)
         print(f"Iteration {i+1} - Test Acc: {acc:.4f} | F1: {f1:.4f}")
+
         if i < len(thresholds) - 1 and len(unlabeled_x) > 0:
-            new_x, new_y, unlabeled_x = pseudo_label(model, unlabeled_x, thr, args.batch_size, device)
+            new_x, new_y, unlabeled_x = pseudo_label(
+                model, unlabeled_x, thr, args.batch_size, device
+            )
             print(f"  Pseudo labeled samples added: {len(new_x)}")
             if len(new_x) > 0:
                 pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
                 pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
+
         torch.save(model.state_dict(), os.path.join(args.model_dir, f"mlp_repr_{i}.pt"))
+
+    # After the iterative phase, pseudo label any remaining unlabeled data and the test data
+    final_thr = thresholds[-1]
+    if len(unlabeled_x) > 0:
+        new_x, new_y, _ = pseudo_label(model, unlabeled_x, final_thr, args.batch_size, device)
+        if len(new_x) > 0:
+            pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
+            pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
+
+    test_pseudo_x, test_pseudo_y, _ = pseudo_label(
+        model, test_unlabeled_x, final_thr, args.batch_size, device
+    )
+    print(f"Pseudo labeled test samples: {len(test_pseudo_x)}")
+
+    # Train final classifier with all pseudo labeled data included
+    all_x = np.concatenate([train_x, pseudo_x_total, test_pseudo_x], axis=0)
+    all_y = np.concatenate([train_y, pseudo_y_total, test_pseudo_y], axis=0)
+
+    final_ds = TensorDataset(torch.from_numpy(all_x), torch.from_numpy(all_y))
+    final_loader = DataLoader(final_ds, batch_size=args.batch_size, shuffle=True)
+
+    model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    criterion = nn.BCEWithLogitsLoss()
+
+    for epoch in tqdm.tqdm(range(50)):
+        model.train()
+        for x, y in final_loader:
+            x = x.to(device)
+            y = y.to(device)
+            opt.zero_grad()
+            out = model(x)
+            loss = criterion(out, y)
+            loss.backward()
+            opt.step()
+
+    acc, f1 = evaluate(model, test_loader, device)
+    print(f"Final model - Test Acc: {acc:.4f} | F1: {f1:.4f}")
+
+    torch.save(model.state_dict(), os.path.join(args.model_dir, "mlp_repr_final.pt"))
+
     return model
 
 
@@ -229,7 +282,17 @@ def main(args):
     test_loader = DataLoader(test_ds, batch_size=args.batch_size)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.model_dir, exist_ok=True)
-    model = self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, args, device)
+    model = self_training(
+        train_x,
+        train_y,
+        unlabeled_x,
+        test_x.copy(),
+        test_loader,
+        input_dim,
+        window_size,
+        args,
+        device,
+    )
     torch.save(model.state_dict(), os.path.join(args.model_dir, "mlp_repr.pt"))
 
 
