@@ -5,9 +5,9 @@ Below is a high level summary of the public functions and class methods found in
 ## evaluate.py
 * **load_valid_segments** – read `results.txt` and return a mapping of valid label segments for each session.
 * **evaluate_predictions** – compute accuracy, precision, recall and F1 for each label column.
-* **load_model** – load a saved `DeepMLPClassifier` checkpoint.
-* **load_session_segment_data** – read representation and label data for a session with optional segment filtering.
-* **main** – command line entry for batch evaluation.
+* **load_labels** – read ground truth CSV labels for one session.
+* **load_predictions** – slice prediction CSVs using segment indices.
+* **main** – command line entry for batch evaluation of prediction files.
 
 ## inference.py
 * **latest_checkpoint** – locate the most recent encoder checkpoint.
