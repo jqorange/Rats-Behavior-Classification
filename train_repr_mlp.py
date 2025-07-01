@@ -141,7 +141,7 @@ def evaluate(model, loader, device):
     return acc, f1
 
 
-def pseudo_label(model, data, threshold, batch_size, device):
+def pseudo_label(model, data, thresholds, batch_size, device):
     if len(data) == 0:
         return (
             np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32),
@@ -153,16 +153,17 @@ def pseudo_label(model, data, threshold, batch_size, device):
     keep_indices = []
     preds = []
     start = 0
+    thresholds = np.asarray(thresholds)[None, :]
     with torch.no_grad():
         for batch in loader:
             x = batch[0].to(device)
             probs = torch.sigmoid(model(x)).cpu().numpy()
-            mask = probs >= threshold
-            has_label = mask.sum(axis=1) > 0
+            mask = probs >= thresholds
+            has_label = mask.any(axis=1)
             if np.any(has_label):
                 idx = np.nonzero(has_label)[0] + start
                 keep_indices.extend(idx.tolist())
-                preds.append((mask[has_label]).astype(np.float32))
+                preds.append(probs[has_label])
             start += len(batch[0])
     if keep_indices:
         pseudo_x = data[keep_indices]
@@ -178,25 +179,46 @@ def pseudo_label(model, data, threshold, batch_size, device):
 
 
 def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, input_dim, window_size, args, device):
-    """Self-training loop with additional pseudo labeling of test data."""
+    """Self-training loop with EMA and class specific thresholds."""
 
     pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
-    thresholds = np.linspace(0.95, 0.6, 10)
-    model = None
+    base_thresholds = np.linspace(0.95, 0.6, 10)
 
-    for i, thr in enumerate(thresholds):
-        print(f"\n=== Iteration {i+1}/10 | Threshold {thr:.2f} ===")
+    model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
+    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    criterion = nn.BCEWithLogitsLoss()
+
+    class EMA:
+        def __init__(self, model, decay=0.999):
+            self.decay = decay
+            self.shadow = {k: v.detach().clone() for k, v in model.state_dict().items()}
+
+        def update(self, model):
+            for k, v in model.state_dict().items():
+                self.shadow[k] = self.decay * self.shadow[k] + (1 - self.decay) * v.detach()
+
+        def apply_to(self, model):
+            model.load_state_dict(self.shadow)
+
+    ema = EMA(model)
+
+    for i, thr in enumerate(base_thresholds):
+        print(f"\n=== Iteration {i+1}/10 | Base Threshold {thr:.2f} ===")
 
         combined_x = np.concatenate([train_x, pseudo_x_total], axis=0)
         combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
 
+        counts = combined_y.sum(axis=0)
+        max_c, min_c = counts.max(), counts.min()
+        if max_c == min_c:
+            class_thresholds = np.full(len(LABEL_COLUMNS), thr)
+        else:
+            ratio = (counts - min_c) / (max_c - min_c)
+            class_thresholds = thr * ratio + base_thresholds[-1] * (1 - ratio)
+
         train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-
-        model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
-        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-        criterion = nn.BCEWithLogitsLoss()
 
         for epoch in tqdm.tqdm(range(50)):
             model.train()
@@ -208,44 +230,41 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
                 loss = criterion(out, y)
                 loss.backward()
                 opt.step()
+                ema.update(model)
 
-        acc, f1 = evaluate(model, test_loader, device)
+        ema_model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
+        ema.apply_to(ema_model)
+        acc, f1 = evaluate(ema_model, test_loader, device)
         print(f"Iteration {i+1} - Test Acc: {acc:.4f} | F1: {f1:.4f}")
 
-        if i < len(thresholds) - 1 and len(unlabeled_x) > 0:
+        if i < len(base_thresholds) - 1 and len(unlabeled_x) > 0:
             new_x, new_y, unlabeled_x = pseudo_label(
-                model, unlabeled_x, thr, args.batch_size, device
+                ema_model, unlabeled_x, class_thresholds, args.batch_size, device
             )
             print(f"  Pseudo labeled samples added: {len(new_x)}")
             if len(new_x) > 0:
                 pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
                 pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
 
-        torch.save(model.state_dict(), os.path.join(args.model_dir, f"mlp_repr_{i}.pt"))
+        torch.save(ema.shadow, os.path.join(args.model_dir, f"mlp_repr_{i}.pt"))
 
-    # After the iterative phase, pseudo label any remaining unlabeled data and the test data
-    final_thr = thresholds[-1]
+    final_thr = base_thresholds[-1]
     if len(unlabeled_x) > 0:
-        new_x, new_y, _ = pseudo_label(model, unlabeled_x, final_thr, args.batch_size, device)
+        new_x, new_y, _ = pseudo_label(ema_model, unlabeled_x, class_thresholds, args.batch_size, device)
         if len(new_x) > 0:
             pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
             pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
 
     test_pseudo_x, test_pseudo_y, _ = pseudo_label(
-        model, test_unlabeled_x, final_thr, args.batch_size, device
+        ema_model, test_unlabeled_x, class_thresholds, args.batch_size, device
     )
     print(f"Pseudo labeled test samples: {len(test_pseudo_x)}")
 
-    # Train final classifier with all pseudo labeled data included
     all_x = np.concatenate([train_x, pseudo_x_total, test_pseudo_x], axis=0)
     all_y = np.concatenate([train_y, pseudo_y_total, test_pseudo_y], axis=0)
 
     final_ds = TensorDataset(torch.from_numpy(all_x), torch.from_numpy(all_y))
     final_loader = DataLoader(final_ds, batch_size=args.batch_size, shuffle=True)
-
-    model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    criterion = nn.BCEWithLogitsLoss()
 
     for epoch in tqdm.tqdm(range(50)):
         model.train()
@@ -257,13 +276,15 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
             loss = criterion(out, y)
             loss.backward()
             opt.step()
+            ema.update(model)
 
-    acc, f1 = evaluate(model, test_loader, device)
+    ema.apply_to(ema_model)
+    acc, f1 = evaluate(ema_model, test_loader, device)
     print(f"Final model - Test Acc: {acc:.4f} | F1: {f1:.4f}")
 
-    torch.save(model.state_dict(), os.path.join(args.model_dir, "mlp_repr_final.pt"))
+    torch.save(ema.shadow, os.path.join(args.model_dir, "mlp_repr_final.pt"))
 
-    return model
+    return ema_model
 
 
 def main(args):
