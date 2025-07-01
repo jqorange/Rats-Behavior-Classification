@@ -35,6 +35,17 @@ def load_new_session(data_path: str, session: str):
     return imu_u, dlc_u, sup_imu, sup_dlc, labels
 
 
+def select_first_n_per_class(sup_imu: np.ndarray, sup_dlc: np.ndarray,
+                             labels: np.ndarray, n: int = 50):
+    """Return the first ``n`` frames of each class from the supervised data."""
+    idx = []
+    for i in range(labels.shape[1]):
+        cls_idx = np.where(labels[:, i] == 1)[0]
+        idx.extend(cls_idx[:n])
+    idx = np.sort(np.unique(idx))
+    return sup_imu[idx], sup_dlc[idx], labels[idx]
+
+
 def freeze_except_adapters(trainer: FusionTrainer):
     for p in trainer.encoder_fusion.parameters():
         p.requires_grad = False
@@ -158,6 +169,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     imu_u, dlc_u, sup_imu, sup_dlc, labels = load_new_session(args.data_path, args.session)
+    # only keep the first 50 frames of each class for finetuning
+    sup_imu, sup_dlc, labels = select_first_n_per_class(sup_imu, sup_dlc, labels, n=50)
     num_classes = labels.shape[1]
     d_model = 64
 

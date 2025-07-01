@@ -71,6 +71,15 @@ def load_session_segment_data(rep_dir, label_dir, session, segments):
 
     return reps, labels
 
+def exclude_first_n_per_class(reps: np.ndarray, labels: np.ndarray, n: int = 50):
+    """Exclude the first ``n`` frames of each class from the arrays."""
+    keep = []
+    for i in range(labels.shape[1]):
+        cls_idx = np.where(labels[:, i] == 1)[0]
+        keep.extend(cls_idx[n:])
+    keep = np.sort(np.unique(keep))
+    return reps[keep], labels[keep]
+
 def main(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     segs = load_valid_segments(os.path.join(args.label_path, "results.txt"))
@@ -96,6 +105,8 @@ def main(args):
             continue
 
         reps, labels = load_session_segment_data(args.rep_dir, args.label_path, session, segs[session])
+        # use frames after the first 50 of each class for evaluation
+        reps, labels = exclude_first_n_per_class(reps, labels, n=50)
         if len(reps) == 0:
             print(f"No valid segment data in session {session}, skipping.")
             continue
