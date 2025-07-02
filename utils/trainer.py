@@ -293,12 +293,14 @@ class FusionTrainer:
                 if self.use_amp:
                     self.scaler.scale(loss).backward()
                     self.scaler.step(self.optimizer_encoder)
-                    self.scaler.step(self.optimizer_center)
+                    if stage == "all":
+                        self.scaler.step(self.optimizer_center)
                     self.scaler.update()
                 else:
                     loss.backward()
                     self.optimizer_encoder.step()
-                    self.optimizer_center.step()
+                    if stage == "all":
+                        self.optimizer_center.step()
 
                 # 记录
                 if stage == 'all':
@@ -429,7 +431,7 @@ class FusionTrainer:
                     center_unsup = self.center_loss_fn(f_u, F.one_hot(pseudo, num_classes=self.num_classes).float())
                     center_loss = center_sup + center_unsup
 
-                loss = 0.1*sup_loss+0.7*unsup_loss+0.2*proto_loss + 0.1*center_loss
+                loss = 0.2*sup_loss+0.7*unsup_loss+0.2*proto_loss + 0.1*center_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:

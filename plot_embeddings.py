@@ -1,3 +1,5 @@
+# Full updated script with `--if_split` behavior that uses the last 20% of labeled regions from results.txt
+
 import argparse
 import os
 import numpy as np
@@ -18,22 +20,34 @@ def load_channel_names(base_path, session):
     return []
 
 
+def load_label_ranges(results_txt_path):
+    session_ranges = {}
+    with open(results_txt_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.strip().split('\t')
+            csv_path = parts[0]
+            session_name = os.path.basename(csv_path).replace("label_", "").replace(".csv", "")
+            range_str = parts[1]
+            ranges = eval(range_str)  # [(start, end), ...]
+            session_ranges[session_name] = ranges
+    return session_ranges
+
+
 def compute_cluster_metrics(data_pca, labels, channel_names):
     results = {}
     valid_indices = np.array([np.argmax(row) if row.sum() > 0 else -1 for row in labels])
 
-    # Remove NANs
     mask = valid_indices != -1
     filtered_data = data_pca[mask]
     filtered_labels = valid_indices[mask]
 
-    # 1. Silhouette Score
     if len(np.unique(filtered_labels)) > 1:
         sil_score = silhouette_score(filtered_data, filtered_labels, metric="cosine")
     else:
         sil_score = float("nan")
 
-    # 2. Center-to-sample cosine similarity
     label_to_samples = defaultdict(list)
     for i, label in enumerate(filtered_labels):
         label_to_samples[label].append(filtered_data[i])
@@ -46,13 +60,11 @@ def compute_cluster_metrics(data_pca, labels, channel_names):
         cos_sims.extend(sims.flatten())
     avg_cos_sim = np.mean(cos_sims)
 
-    # 3. Intra-class and inter-class distance
     centers = {}
     for label, samples in label_to_samples.items():
         samples = np.vstack(samples)
         centers[label] = samples.mean(axis=0)
 
-    # Intra-class
     intra_dist = 0.0
     total_count = 0
     for label, samples in label_to_samples.items():
@@ -62,7 +74,6 @@ def compute_cluster_metrics(data_pca, labels, channel_names):
         total_count += len(samples)
     intra_avg = intra_dist / total_count
 
-    # Inter-class
     center_list = list(centers.values())
     inter_dists = []
     for i in range(len(center_list)):
@@ -83,22 +94,44 @@ def main(args):
     rep_list = []
     label_list = []
     channel_names = []
+
+    label_ranges = {}
+    if args.if_split:
+        label_ranges = load_label_ranges(os.path.join(args.data_path, "labels", "results.txt"))
+
     for s in sessions:
         rep_file = os.path.join(args.rep_dir, f"{s}_repr.npy")
         if not os.path.exists(rep_file):
             print(f"Representation for {s} not found")
             continue
         reps = np.load(rep_file)
-        rep_list.append(reps)
 
-        label_file = os.path.join(args.data_path, "labels", f"{s}", f"label_{s}.csv")
+        label_file = os.path.join(args.data_path, "labels", s, f"label_{s}.csv")
         if os.path.exists(label_file):
             labels = pd.read_csv(label_file).values[:, 1:13]
-            if len(labels) > len(reps):
-                labels = labels[: len(reps)]
-            elif len(labels) < len(reps):
-                reps = reps[: len(labels)]
+            min_len = min(len(labels), len(reps))
+            labels = labels[:min_len]
+            reps = reps[:min_len]
+
+            if args.if_split and s in label_ranges:
+                all_indices = []
+                for start, end in label_ranges[s]:
+                    start = max(0, start)
+                    end = min(len(labels), end)
+                    all_indices.extend(range(start, end))
+                if not all_indices:
+                    print(f"[WARN] No labeled range for session {s}")
+                    continue
+                split_start = int(0.8 * len(all_indices))
+                selected_indices = all_indices[split_start:]
+                labels = labels[selected_indices]
+                reps = reps[selected_indices]
+
             label_list.append(labels)
+        else:
+            continue
+
+        rep_list.append(reps)
         if not channel_names:
             channel_names = load_channel_names(args.data_path, s)
 
@@ -162,9 +195,8 @@ def main(args):
     )
     fig.show()
 
-    # ✅ 打印结构性评估指标
     if labels is not None:
-        metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])  # exclude "NAN"
+        metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])
         print("\n=== Cluster Evaluation Metrics ===")
         for k, v in metrics.items():
             print(f"{k}: {v:.4f}")
@@ -172,9 +204,9 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot representations with evaluation")
-    parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_1",
-                        help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F5D10_outdoor"], help="Session names")
+    parser.add_argument("--data_path", default="D:\\Jiaqi\\Datasets\\Rats\\TrainData", help="Base data path")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor","F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_1"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
+    parser.add_argument("--if_split", default=True, help="If true, only use last 20% of labeled data for evaluation")
     args = parser.parse_args()
     main(args)
