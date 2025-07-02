@@ -664,27 +664,43 @@ class FusionTrainer:
 
         all_losses = {'contrastive': [], 'mlp': [], 'test_performance': []}
 
-        cut_u = int(0.8 * len(train_data_A))
-        train_data_A_80 = train_data_A[:cut_u]
-        train_data_B_80 = train_data_B[:cut_u]
-        train_ids_80 = train_ids[:cut_u]
+        # Unsupervised data uses all samples
+        train_data_A_80 = train_data_A
+        train_data_B_80 = train_data_B
+        train_ids_80 = train_ids
 
         if train_data_sup_A is not None and len(train_data_sup_A):
-            cut_s = int(0.8 * len(train_data_sup_A))
-            train_sup_A_80 = train_data_sup_A[:cut_s]
-            train_sup_B_80 = train_data_sup_B[:cut_s]
-            sup_ids_80 = sup_ids[:cut_s]
-            labels_sup_80 = labels_sup[:cut_s]
+            # Take the first 80% from each session individually for supervised data
+            unique_ids = np.unique(sup_ids)
+            sup_A_parts, sup_B_parts, label_parts, id_parts = [], [], [], []
+            for sid in unique_ids:
+                idxs = np.where(sup_ids == sid)[0]
+                cut = int(0.8 * len(idxs))
+                if cut == 0:
+                    continue
+                sel = idxs[:cut]
+                sup_A_parts.append(train_data_sup_A[sel])
+                sup_B_parts.append(train_data_sup_B[sel])
+                label_parts.append(labels_sup[sel])
+                id_parts.append(sup_ids[sel])
+            if len(sup_A_parts):
+                train_sup_A_80 = np.concatenate(sup_A_parts, axis=0)
+                train_sup_B_80 = np.concatenate(sup_B_parts, axis=0)
+                labels_sup_80 = np.concatenate(label_parts, axis=0)
+                sup_ids_80 = np.concatenate(id_parts, axis=0)
+            else:
+                train_sup_A_80 = np.empty((0, *train_data_sup_A.shape[1:]), dtype=train_data_sup_A.dtype)
+                train_sup_B_80 = np.empty((0, *train_data_sup_B.shape[1:]), dtype=train_data_sup_B.dtype)
+                labels_sup_80 = np.empty((0, labels_sup.shape[1]), dtype=labels_sup.dtype)
+                sup_ids_80 = np.empty((0,), dtype=sup_ids.dtype)
         else:
             train_sup_A_80 = train_data_sup_A
             train_sup_B_80 = train_data_sup_B
             sup_ids_80 = sup_ids
             labels_sup_80 = labels_sup
 
-        unsup_sessions_80 = {
-            s: (imu[:int(0.8*len(imu))], dlc[:int(0.8*len(dlc))], ids[:int(0.8*len(ids))])
-            for s, (imu, dlc, ids) in unsup_sessions.items()
-        }
+        # Unsupervised sessions keep all samples
+        unsup_sessions_80 = unsup_sessions
 
         for epoch in range(start_epoch, self.n_all):
             if verbose:
