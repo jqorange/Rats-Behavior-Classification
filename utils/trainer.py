@@ -10,6 +10,7 @@ import tqdm
 from models.losses import (
     compute_contrastive_losses,
     PrototypeMemory,
+    CenterLoss,
 )
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
@@ -114,6 +115,8 @@ class FusionTrainer:
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
         self.prototype_memory = PrototypeMemory(num_classes, d_model)
+        self.center_loss_fn = CenterLoss(num_classes, d_model).to(device)
+        self.optimizer_center = torch.optim.AdamW(self.center_loss_fn.parameters(), lr=lr_encoder)
 
         self.n_epochs = 0
         self.n_iters = 0
@@ -200,9 +203,17 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'unsup': 0.0,
-                'js': 0.0,
+                'proto': 0.0,
                 'total': 0.0,
             }
+            if stage == 'adapt':
+                pseudo_feats_epoch = []
+                pseudo_labels_epoch = []
+                if not hasattr(self, 'stage2_prototypes'):
+                    self.stage2_prototypes = self.compute_prototypes(
+                        train_data_sup_A, train_data_sup_B, labels_sup
+                    )
+                prototypes = self.stage2_prototypes
             n_batches = 0
             if sup_loader is not None:
                 sup_iter = iter(sup_loader)
@@ -245,14 +256,31 @@ class FusionTrainer:
                         )
                         loss = sup_loss + unsup_loss
                     elif stage == 'adapt':
-                        sup_loss = compute_contrastive_losses(
-                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True, stage=2
-                        )
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False, stage=2
                         )
+                        if sup_loader is not None:
+                            pooled_s = f_s.max(dim=1).values
+                            logits_sup = torch.matmul(F.normalize(pooled_s, dim=-1), F.normalize(prototypes, dim=-1).T)
+                            target_sup = y_s.argmax(dim=1)
+                            proto_sup = F.cross_entropy(logits_sup, target_sup)
+                        else:
+                            proto_sup = torch.tensor(0.0, device=self.device)
+                            pooled_s = None
 
-                        loss = 0.01*sup_loss + 0.99*unsup_loss
+                        pooled_u = f_u.max(dim=1).values
+                        sims = torch.matmul(F.normalize(pooled_u, dim=-1), F.normalize(prototypes, dim=-1).T)
+                        max_sims, pseudo = sims.max(dim=1)
+                        mask_h = max_sims > 0.9
+                        if mask_h.any():
+                            proto_unsup = F.cross_entropy(sims[mask_h], pseudo[mask_h])
+                            pseudo_feats_epoch.append(pooled_u[mask_h].detach())
+                            pseudo_labels_epoch.append(pseudo[mask_h].detach())
+                        else:
+                            proto_unsup = torch.tensor(0.0, device=self.device)
+
+                        proto_loss = proto_sup + proto_unsup
+                        loss = 0.7*unsup_loss + 0.3*proto_loss
                     else:
                         unsup_loss = compute_contrastive_losses(
                             self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
@@ -261,13 +289,16 @@ class FusionTrainer:
 
                 # 反向更新
                 self.optimizer_encoder.zero_grad()
+                self.optimizer_center.zero_grad()
                 if self.use_amp:
                     self.scaler.scale(loss).backward()
                     self.scaler.step(self.optimizer_encoder)
+                    self.scaler.step(self.optimizer_center)
                     self.scaler.update()
                 else:
                     loss.backward()
                     self.optimizer_encoder.step()
+                    self.optimizer_center.step()
 
                 # 记录
                 if stage == 'all':
@@ -275,8 +306,8 @@ class FusionTrainer:
                     epoch_losses['unsup'] += unsup_loss.item()
                     epoch_losses['total'] += loss.item()
                 elif stage == 'adapt':
-                    epoch_losses['sup'] += sup_loss.item()
                     epoch_losses['unsup'] += unsup_loss.item()
+                    epoch_losses['proto'] += proto_loss.item()
                     epoch_losses['total'] += loss.item()
                 else:
                     epoch_losses['unsup'] += unsup_loss.item()
@@ -294,7 +325,15 @@ class FusionTrainer:
                 if stage == 'all':
                     print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}")
                 elif stage == 'adapt':
-                    print(f"Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, JS={epoch_losses['js']:.8f}")
+                    print(f"Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}")
+            if stage == 'adapt' and pseudo_feats_epoch:
+                pseudo_feats_cat = torch.cat(pseudo_feats_epoch, dim=0)
+                pseudo_labels_cat = torch.cat(pseudo_labels_epoch, dim=0)
+                self.stage2_prototypes = self.compute_prototypes(
+                    train_data_sup_A, train_data_sup_B, labels_sup,
+                    extra_feats=pseudo_feats_cat,
+                    extra_labels=pseudo_labels_cat,
+                )
             self.n_epochs += 1
 
         return contrastive_losses
@@ -340,7 +379,7 @@ class FusionTrainer:
         contrastive_losses = []
 
         for epoch in range(self.contrastive_epochs):
-            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'proto': 0.0, 'total': 0.0}
+            epoch_losses = {'sup': 0.0, 'unsup': 0.0, 'proto': 0.0, 'center': 0.0, 'total': 0.0}
             unsup_iter = iter(unsup_loader)
 
             for _ in tqdm.tqdm(range(len(unsup_loader)), desc=f'Stage3 Epoch {epoch+1}/{self.contrastive_epochs}'):
@@ -386,7 +425,11 @@ class FusionTrainer:
                     pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
                     proto_loss = self.prototype_memory(pooled_u, pseudo)
 
-                loss = 0.1*sup_loss+0.7*unsup_loss+0.2*proto_loss
+                    center_sup = self.center_loss_fn(f_s, y_s.float()) if sup_loader is not None else torch.tensor(0.0, device=self.device)
+                    center_unsup = self.center_loss_fn(f_u, F.one_hot(pseudo, num_classes=self.num_classes).float())
+                    center_loss = center_sup + center_unsup
+
+                loss = 0.1*sup_loss+0.7*unsup_loss+0.2*proto_loss + 0.1*center_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -405,6 +448,7 @@ class FusionTrainer:
 
                 epoch_losses['unsup'] += unsup_loss.item()
                 epoch_losses['proto'] += proto_loss.item()
+                epoch_losses['center'] = epoch_losses.get('center', 0.0) + center_loss.item()
                 epoch_losses['total'] += loss.item()
                 if sup_loader is not None:
                     epoch_losses['sup'] += sup_loss.item()
@@ -416,7 +460,7 @@ class FusionTrainer:
 
             if verbose:
                 print(
-                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}"
+                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}, Center={epoch_losses['center']:.8f}"
                 )
             self.n_epochs += 1
 
@@ -618,6 +662,28 @@ class FusionTrainer:
 
         all_losses = {'contrastive': [], 'mlp': [], 'test_performance': []}
 
+        cut_u = int(0.8 * len(train_data_A))
+        train_data_A_80 = train_data_A[:cut_u]
+        train_data_B_80 = train_data_B[:cut_u]
+        train_ids_80 = train_ids[:cut_u]
+
+        if train_data_sup_A is not None and len(train_data_sup_A):
+            cut_s = int(0.8 * len(train_data_sup_A))
+            train_sup_A_80 = train_data_sup_A[:cut_s]
+            train_sup_B_80 = train_data_sup_B[:cut_s]
+            sup_ids_80 = sup_ids[:cut_s]
+            labels_sup_80 = labels_sup[:cut_s]
+        else:
+            train_sup_A_80 = train_data_sup_A
+            train_sup_B_80 = train_data_sup_B
+            sup_ids_80 = sup_ids
+            labels_sup_80 = labels_sup
+
+        unsup_sessions_80 = {
+            s: (imu[:int(0.8*len(imu))], dlc[:int(0.8*len(dlc))], ids[:int(0.8*len(ids))])
+            for s, (imu, dlc, ids) in unsup_sessions.items()
+        }
+
         for epoch in range(start_epoch, self.n_all):
             if verbose:
                 print(f"\n=== Epoch {epoch + 1}/{self.n_all} ===")
@@ -632,35 +698,35 @@ class FusionTrainer:
 
             elif epoch < self.n_adapted:
                 if epoch == self.n_stable+1:
-                    self.init_stage2(unsup_sessions, train_data_A, train_data_B, train_ids,
-                                    train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                    self.init_stage2(unsup_sessions_80, train_data_A_80, train_data_B_80, train_ids_80,
+                                    train_sup_A_80, train_sup_B_80, sup_ids_80, labels_sup_80,
                                     verbose=True)
 
                 contrastive_losses = self.train_contrastive_phase(
-                    train_data_A,
-                    train_data_B,
-                    train_ids,
-                    train_data_sup_A,
-                    train_data_sup_B,
-                    sup_ids,
-                    labels_sup,
+                    train_data_A_80,
+                    train_data_B_80,
+                    train_ids_80,
+                    train_sup_A_80,
+                    train_sup_B_80,
+                    sup_ids_80,
+                    labels_sup_80,
                     verbose,
                     stage="adapt",
-                    unsup_by_session=unsup_sessions,
+                    unsup_by_session=unsup_sessions_80,
                 )
             else:
                 if epoch == self.n_adapted + 1:
-                    self.init_stage3(unsup_sessions, train_data_A, train_data_B, train_ids,
-                                     train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
+                    self.init_stage3(unsup_sessions_80, train_data_A_80, train_data_B_80, train_ids_80,
+                                     train_sup_A_80, train_sup_B_80, sup_ids_80, labels_sup_80,
                                      verbose=True)
 
                 for param in self.encoder_fusion.parameters():
                     param.requires_grad = True
 
                 contrastive_losses = self.train_stage3(
-                    train_data_A, train_data_B, train_ids,
-                    train_data_sup_A, train_data_sup_B,
-                    sup_ids, labels_sup, verbose
+                    train_data_A_80, train_data_B_80, train_ids_80,
+                    train_sup_A_80, train_sup_B_80,
+                    sup_ids_80, labels_sup_80, verbose
                 )
                 all_losses['contrastive'].extend(contrastive_losses)
 
@@ -866,6 +932,43 @@ class FusionTrainer:
         self.encoder_fusion.train()
         self.classifier.train()
         return output.numpy()
+
+    def compute_prototypes(self, data_A, data_B, labels, extra_feats=None, extra_labels=None, batch_size=None):
+        """Compute class prototypes from labelled data and optional extra features."""
+        if batch_size is None:
+            batch_size = self.batch_size
+
+        dataset = TensorDataset(
+            torch.from_numpy(data_A).float(),
+            torch.from_numpy(data_B).float(),
+        )
+        loader = DataLoader(dataset, batch_size=batch_size)
+
+        feats = []
+        with torch.no_grad():
+            for xA, xB in loader:
+                xA, xB = xA.to(self.device), xB.to(self.device)
+                out = self.encoder_fusion(xA, xB)
+                pooled = out.max(dim=1).values
+                feats.append(pooled.cpu())
+
+        feats = torch.cat(feats, dim=0)
+        labels_t = torch.from_numpy(labels).float()
+
+        if extra_feats is not None and extra_labels is not None and len(extra_feats) > 0:
+            feats = torch.cat([feats, extra_feats.cpu()], dim=0)
+            extra_onehot = F.one_hot(extra_labels, num_classes=self.num_classes).float()
+            labels_t = torch.cat([labels_t, extra_onehot.cpu()], dim=0)
+
+        protos = []
+        for c in range(self.num_classes):
+            mask = labels_t[:, c] > 0
+            if mask.any():
+                protos.append(feats[mask].mean(0))
+            else:
+                protos.append(torch.zeros(self.d_model))
+
+        return torch.stack(protos).to(self.device)
 
     def save(self, num):
         """Save the trained models"""
