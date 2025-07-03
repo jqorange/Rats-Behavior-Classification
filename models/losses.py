@@ -252,16 +252,19 @@ class PrototypeMemory(nn.Module):
         sims = torch.matmul(feats, protos.t())
         return sims.argmax(dim=1)
 
+    @torch.no_grad()
+    def soft_labels(self, feats: torch.Tensor) -> torch.Tensor:
+        """Return probability distribution over classes for ``feats``."""
+        feats = F.normalize(feats, dim=-1)
+        protos = F.normalize(self.prototypes, dim=-1)
+        logits = torch.matmul(feats, protos.t())
+        return torch.softmax(logits, dim=-1)
+
 
     @torch.no_grad()
     def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
                feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
-        """Update prototypes using labelled data and pseudo labels with soft weighting.
-
-        ``pseudo`` can either be hard labels or a probability distribution. When
-        ``feats_unsup`` is provided but ``pseudo`` is ``None`` the probabilities
-        are computed from current prototypes.
-        """
+        """Momentum update of prototypes using features and (soft) labels."""
 
         # === Determine device ===
         device = None
@@ -273,49 +276,45 @@ class PrototypeMemory(nn.Module):
             return
 
         new_protos = self.prototypes.clone().to(device)
+        momentum = 0.01
 
         # ---- Initialization ----
         if not self.initialized:
             if feats_sup is not None and labels_sup is not None:
                 feats_sup = F.normalize(feats_sup, dim=-1)
-                for c in range(self.num_classes):
-                    mask = labels_sup[:, c].bool()
-                    if mask.any():
-                        new_protos[c] = feats_sup[mask].mean(0)
+                counts = labels_sup.sum(0).clamp_min(1.0).unsqueeze(1)
+                new_protos = labels_sup.t() @ feats_sup
+                new_protos = new_protos / counts
             self.prototypes = F.normalize(new_protos, dim=-1)
             self.initialized = True
             return
 
         current_protos = F.normalize(self.prototypes.to(device), dim=-1)
+        feats_list = []
+        probs_list = []
         if feats_sup is not None and labels_sup is not None:
             feats_sup = F.normalize(feats_sup, dim=-1)
-            for c in range(self.num_classes):
-                mask = labels_sup[:, c].bool()
-                if mask.any():
-                    feats_c = feats_sup[mask]
-                    sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
-                    weights = torch.softmax(sims, dim=0)
-                    new_protos[c] = (weights.unsqueeze(1) * feats_c).sum(0)
-
-        momentum = 0.01
+            probs_list.append(labels_sup)
+            feats_list.append(feats_sup)
         if feats_unsup is not None:
             feats_unsup = F.normalize(feats_unsup, dim=-1)
-            if pseudo is None or pseudo.dim() == 1:
-                # compute soft pseudo label distribution from current prototypes
-                logits = torch.matmul(feats_unsup, current_protos.t())
-                probs = torch.softmax(logits, dim=-1)
-            else:
-                probs = pseudo
+            if pseudo is None:
+                pseudo = self.soft_labels(feats_unsup)
+            probs_list.append(pseudo)
+            feats_list.append(feats_unsup)
+
+        if feats_list:
+            feats_all = torch.cat(feats_list, dim=0)
+            probs_all = torch.cat(probs_list, dim=0)
 
             for c in range(self.num_classes):
-                pc = probs[:, c]
+                pc = probs_all[:, c]
                 if pc.sum() < 1e-6:
                     continue
-                weighted_feats = feats_unsup * pc.unsqueeze(1)
-                feat_c = weighted_feats.sum(0) / pc.sum()
+                feat_c = (feats_all * pc.unsqueeze(1)).sum(0) / pc.sum()
                 new_protos[c] = F.normalize(
                     (1 - momentum) * current_protos[c] + momentum * feat_c,
-                    dim=0
+                    dim=0,
                 )
 
         self.prototypes = F.normalize(new_protos, dim=-1)
