@@ -237,10 +237,11 @@ class UncertaintyWeighting(nn.Module):
 class PrototypeMemory(nn.Module):
     """Maintain class prototypes and provide prototype-based loss."""
 
-    def __init__(self, num_classes: int, feat_dim: int):
+    def __init__(self, num_classes: int, feat_dim: int, temperature: float = 1.0):
         super().__init__()
         self.num_classes = num_classes
         self.feat_dim = feat_dim
+        self.temp = float(temperature)
         self.register_buffer("prototypes", torch.zeros(num_classes, feat_dim))
         self.initialized = False
 
@@ -253,11 +254,19 @@ class PrototypeMemory(nn.Module):
         return sims.argmax(dim=1)
 
     @torch.no_grad()
-    def soft_labels(self, feats: torch.Tensor) -> torch.Tensor:
-        """Return probability distribution over classes for ``feats``."""
+    def soft_labels(self, feats: torch.Tensor, temperature: float | None = None) -> torch.Tensor:
+        """Return probability distribution over classes for ``feats``.
+
+        Args:
+            feats: input features.
+            temperature: optional temperature for sharpening. ``self.temp`` is
+                used when ``None``.
+        """
+        if temperature is None:
+            temperature = self.temp
         feats = F.normalize(feats, dim=-1)
         protos = F.normalize(self.prototypes, dim=-1)
-        logits = torch.matmul(feats, protos.t())
+        logits = torch.matmul(feats, protos.t()) / temperature
         return torch.softmax(logits, dim=-1)
 
 

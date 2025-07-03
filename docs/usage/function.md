@@ -54,9 +54,9 @@ Below is a high level summary of the public functions and class methods found in
 * **CenterLoss.forward** – compute distance from features to class centers.
 * **UncertaintyWeighting.__init__** – learn weights for combining multiple losses.
 * **UncertaintyWeighting.forward** – apply uncertainty weighting.
-* **PrototypeMemory.__init__** – store class prototypes used for pseudo labelling.
+* **PrototypeMemory.__init__** – store class prototypes used for pseudo labelling and set soft label temperature.
 * **PrototypeMemory.assign_labels** – assign pseudo labels based on cosine similarity.
-* **PrototypeMemory.soft_labels** – compute soft label distributions from prototypes.
+* **PrototypeMemory.soft_labels** – compute soft label distributions from prototypes (supports temperature sharpening).
 * **PrototypeMemory.update** – update prototypes using labelled or pseudo labelled features.
 * **PrototypeMemory.forward** – soft alignment loss between features and prototypes.
 * **prototype_repulsion_loss** – penalise similarity to incorrect prototypes. Supports soft labels.
