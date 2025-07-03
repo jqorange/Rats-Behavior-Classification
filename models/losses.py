@@ -321,3 +321,30 @@ class PrototypeMemory(nn.Module):
         loss = F.cross_entropy(logits, targets, reduction="none")
         return (loss * weights).mean()
 
+
+def prototype_repulsion_loss(feats: torch.Tensor, targets: torch.Tensor,
+                             prototypes: torch.Tensor) -> torch.Tensor:
+    """Penalise similarity to non-target prototypes.
+
+    Args:
+        feats: (B, D) sequence features.
+        targets: (B,) integer class labels or pseudo labels.
+        prototypes: (C, D) class prototypes.
+
+    Returns:
+        Scalar repulsion loss encouraging features to stay away from
+        prototypes of other classes.
+    """
+    feats = F.normalize(feats, dim=-1)
+    protos = F.normalize(prototypes, dim=-1)
+
+    logits = torch.matmul(feats, protos.t())  # (B, C)
+    B, C = logits.shape
+    mask = torch.ones_like(logits, dtype=torch.bool)
+    mask[torch.arange(B), targets] = False
+    negative_logits = logits[mask]
+
+    # Softplus grows when similarity to wrong prototypes is high
+    loss = F.softplus(negative_logits).mean()
+    return loss
+

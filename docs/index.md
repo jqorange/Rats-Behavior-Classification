@@ -30,6 +30,7 @@ Training proceeds in three distinct stages:
    * All parameters are unfrozen.
    * Unsupervised, supervised and prototype losses are combined using a soft alignment objective.
    * Pseudo labels are iteratively refined via similarity to class prototypes.
+   * Prototype repulsion discourages similarity to incorrect prototypes.
 
 After these stages an MLP classifier is trained. High confidence predictions are added as new training samples to further improve performance.
 
