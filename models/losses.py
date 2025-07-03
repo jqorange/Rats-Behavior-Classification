@@ -256,7 +256,7 @@ class PrototypeMemory(nn.Module):
     @torch.no_grad()
     def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
                feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
-        """Update prototypes using labeled data and high-similarity pseudo labeled features."""
+        """Update prototypes using labelled data and pseudo labels with soft weighting."""
 
         # === Determine device ===
         device = None
@@ -289,9 +289,8 @@ class PrototypeMemory(nn.Module):
                 if mask.any():
                     feats_c = feats_sup[mask]
                     sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
-                    high_sim_mask = sims > 0.9
-                    if high_sim_mask.any():
-                        new_protos[c] = feats_c[high_sim_mask].mean(0)
+                    weights = torch.softmax(sims, dim=0)
+                    new_protos[c] = (weights.unsqueeze(1) * feats_c).sum(0)
 
         if feats_unsup is not None and pseudo is not None:
             feats_unsup = F.normalize(feats_unsup, dim=-1)
@@ -300,40 +299,25 @@ class PrototypeMemory(nn.Module):
                 if mask.any():
                     feats_c = feats_unsup[mask]
                     sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
-                    high_sim_mask = sims > 0.9
-                    if high_sim_mask.any():
-                        feat_c = feats_c[high_sim_mask].mean(0)
-                        if new_protos[c].abs().sum() == 0:
-                            new_protos[c] = feat_c
-                        else:
-                            new_protos[c] = 0.5 * (new_protos[c] + feat_c)
+                    weights = torch.softmax(sims, dim=0)
+                    feat_c = (weights.unsqueeze(1) * feats_c).sum(0)
+                    if new_protos[c].abs().sum() == 0:
+                        new_protos[c] = feat_c
+                    else:
+                        new_protos[c] = 0.5 * (new_protos[c] + feat_c)
 
         self.prototypes = F.normalize(new_protos, dim=-1)
         self.initialized = True
 
-    def forward(self, feats: torch.Tensor, targets: torch.Tensor, sim_thresh: float = 0.7) -> torch.Tensor:
-        """
-        feats: (B, D)
-        targets: (B,) - int64 class indices
-        sim_thresh: float - minimum similarity to prototype to be counted in loss
-        """
+    def forward(self, feats: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Prototype soft alignment loss without thresholding."""
         feats = F.normalize(feats, dim=-1)
         protos = F.normalize(self.prototypes, dim=-1)
 
         logits = torch.matmul(feats, protos.t())  # (B, C)
+        probs = logits.softmax(dim=-1).detach()
+        weights = probs[torch.arange(len(feats)), targets]
 
-        # Gather similarity to the true class
-        target_sims = logits[torch.arange(len(feats)), targets]  # (B,)
-
-        # Only keep samples with sim > threshold
-        mask = target_sims > sim_thresh
-        if mask.sum() == 0:
-            # No valid samples, return zero loss (safe default)
-            return feats.new_tensor(0.0, requires_grad=True)
-
-        # Filter inputs
-        filtered_logits = logits[mask]
-        filtered_targets = targets[mask]
-
-        return F.cross_entropy(filtered_logits, filtered_targets)
+        loss = F.cross_entropy(logits, targets, reduction="none")
+        return (loss * weights).mean()
 

@@ -28,7 +28,7 @@ Training proceeds in three distinct stages:
    * A supervised contrastive loss attracts samples with overlapping labels across sessions.
 3. **Stage 3 – Prototype Refinement**
    * All parameters are unfrozen.
-   * Unsupervised, supervised and prototype losses are combined.
+   * Unsupervised, supervised and prototype losses are combined using a soft alignment objective.
    * Pseudo labels are iteratively refined via similarity to class prototypes.
 
 After these stages an MLP classifier is trained. High confidence predictions are added as new training samples to further improve performance.

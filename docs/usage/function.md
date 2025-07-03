@@ -57,7 +57,7 @@ Below is a high level summary of the public functions and class methods found in
 * **PrototypeMemory.__init__** – store class prototypes used for pseudo labelling.
 * **PrototypeMemory.assign_labels** – assign pseudo labels based on cosine similarity.
 * **PrototypeMemory.update** – update prototypes using labelled or pseudo labelled features.
-* **PrototypeMemory.forward** – prototype based cross entropy loss.
+* **PrototypeMemory.forward** – soft alignment loss between features and prototypes.
 
 ## models/masking.py
 * **generate_continuous_mask** – drop contiguous blocks of frames.
