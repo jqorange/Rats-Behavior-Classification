@@ -430,24 +430,28 @@ class FusionTrainer:
 
                     pooled_u = f_u.max(dim=1).values
 
-                    if not self.prototype_memory.initialized and pooled_s is not None:
-                        self.prototype_memory.update(pooled_s.detach(), y_s.detach())
+                    soft_u = self.prototype_memory.soft_labels(pooled_u.detach())
+                    if sup_loader is not None:
+                        soft_s = self.prototype_memory.soft_labels(pooled_s.detach())
+                    else:
+                        soft_s = None
 
-                    pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
-                    proto_loss = self.prototype_memory(pooled_u, pseudo)
+                    proto_loss = self.prototype_memory(pooled_u, soft_u)
 
                     center_sup = prototype_center_loss(
-                        f_s, y_s.float(), self.prototype_memory.prototypes
+                        f_s, soft_s, self.prototype_memory.prototypes
                     ) if sup_loader is not None else torch.tensor(0.0, device=self.device)
                     center_unsup = prototype_center_loss(
-                        f_u,
-                        F.one_hot(pseudo, num_classes=self.num_classes).float(),
-                        self.prototype_memory.prototypes,
+                        f_u, soft_u, self.prototype_memory.prototypes
                     )
                     center_loss = center_sup + center_unsup
 
-                    rep_sup = prototype_repulsion_loss(pooled_s, y_s.argmax(dim=1), self.prototype_memory.prototypes) if sup_loader is not None else torch.tensor(0.0, device=self.device)
-                    rep_unsup = prototype_repulsion_loss(pooled_u, pseudo, self.prototype_memory.prototypes)
+                    rep_sup = prototype_repulsion_loss(
+                        pooled_s, soft_s, self.prototype_memory.prototypes
+                    ) if sup_loader is not None else torch.tensor(0.0, device=self.device)
+                    rep_unsup = prototype_repulsion_loss(
+                        pooled_u, soft_u, self.prototype_memory.prototypes
+                    )
                     repulsion_loss = rep_sup + rep_unsup
 
                 loss = 0.2*sup_loss + 0.6*unsup_loss + 0.2*proto_loss + 0.1*center_loss + 0.1*repulsion_loss
@@ -463,9 +467,12 @@ class FusionTrainer:
 
 
                 with torch.no_grad():
-                    self.prototype_memory.update(pooled_s.detach() if pooled_s is not None else None,
-                                                y_s.detach() if pooled_s is not None else None,
-                                                pooled_u.detach(), pseudo)
+                    self.prototype_memory.update(
+                        pooled_s.detach() if pooled_s is not None else None,
+                        soft_s.detach() if soft_s is not None else None,
+                        pooled_u.detach(),
+                        soft_u.detach(),
+                    )
 
                 epoch_losses['unsup'] += unsup_loss.item()
                 epoch_losses['proto'] += proto_loss.item()
@@ -828,6 +835,14 @@ class FusionTrainer:
         self.encoder_fusion.projection.set_mode("align")
 
         self.load(self.n_adapted)
+
+        # === Initialise prototypes using all labelled data ===
+        if train_data_sup_A is not None and len(train_data_sup_A):
+            prototypes = self.compute_prototypes(
+                train_data_sup_A, train_data_sup_B, labels_sup
+            )
+            self.prototype_memory.prototypes = F.normalize(prototypes, dim=-1)
+            self.prototype_memory.initialized = True
 
         return
 
