@@ -256,7 +256,12 @@ class PrototypeMemory(nn.Module):
     @torch.no_grad()
     def update(self, feats_sup: torch.Tensor | None, labels_sup: torch.Tensor | None,
                feats_unsup: torch.Tensor | None = None, pseudo: torch.Tensor | None = None) -> None:
-        """Update prototypes using labelled data and pseudo labels with soft weighting."""
+        """Update prototypes using labelled data and pseudo labels with soft weighting.
+
+        ``pseudo`` can either be hard labels or a probability distribution. When
+        ``feats_unsup`` is provided but ``pseudo`` is ``None`` the probabilities
+        are computed from current prototypes.
+        """
 
         # === Determine device ===
         device = None
@@ -292,34 +297,49 @@ class PrototypeMemory(nn.Module):
                     weights = torch.softmax(sims, dim=0)
                     new_protos[c] = (weights.unsqueeze(1) * feats_c).sum(0)
 
-        if feats_unsup is not None and pseudo is not None:
+        momentum = 0.01
+        if feats_unsup is not None:
             feats_unsup = F.normalize(feats_unsup, dim=-1)
+            if pseudo is None or pseudo.dim() == 1:
+                # compute soft pseudo label distribution from current prototypes
+                logits = torch.matmul(feats_unsup, current_protos.t())
+                probs = torch.softmax(logits, dim=-1)
+            else:
+                probs = pseudo
+
             for c in range(self.num_classes):
-                mask = pseudo == c
-                if mask.any():
-                    feats_c = feats_unsup[mask]
-                    sims = torch.matmul(feats_c, current_protos[c])  # (Nc,)
-                    weights = torch.softmax(sims, dim=0)
-                    feat_c = (weights.unsqueeze(1) * feats_c).sum(0)
-                    if new_protos[c].abs().sum() == 0:
-                        new_protos[c] = feat_c
-                    else:
-                        new_protos[c] = 0.5 * (new_protos[c] + feat_c)
+                pc = probs[:, c]
+                if pc.sum() < 1e-6:
+                    continue
+                weighted_feats = feats_unsup * pc.unsqueeze(1)
+                feat_c = weighted_feats.sum(0) / pc.sum()
+                new_protos[c] = F.normalize(
+                    (1 - momentum) * current_protos[c] + momentum * feat_c,
+                    dim=0
+                )
 
         self.prototypes = F.normalize(new_protos, dim=-1)
         self.initialized = True
 
     def forward(self, feats: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        """Prototype soft alignment loss without thresholding."""
+        """Prototype alignment loss.
+
+        ``targets`` can be integer labels or a probability distribution.
+        When soft targets are provided KL divergence is used.
+        """
         feats = F.normalize(feats, dim=-1)
         protos = F.normalize(self.prototypes, dim=-1)
 
         logits = torch.matmul(feats, protos.t())  # (B, C)
-        probs = logits.softmax(dim=-1).detach()
-        weights = probs[torch.arange(len(feats)), targets]
 
-        loss = F.cross_entropy(logits, targets, reduction="none")
-        return (loss * weights).mean()
+        if targets.dim() == 1:
+            probs = logits.softmax(dim=-1).detach()
+            weights = probs[torch.arange(len(feats)), targets]
+            loss = F.cross_entropy(logits, targets, reduction="none")
+            return (loss * weights).mean()
+        else:
+            log_probs = F.log_softmax(logits, dim=-1)
+            return F.kl_div(log_probs, targets, reduction="batchmean")
 
 
 def prototype_repulsion_loss(feats: torch.Tensor, targets: torch.Tensor,
