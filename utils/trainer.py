@@ -380,6 +380,14 @@ class FusionTrainer:
         else:
             sup_loader = None
 
+        if (not self.prototype_memory.initialized and
+                train_data_sup_A is not None and len(train_data_sup_A)):
+            prototypes = self.compute_prototypes(
+                train_data_sup_A, train_data_sup_B, labels_sup
+            )
+            self.prototype_memory.prototypes = F.normalize(prototypes, dim=-1)
+            self.prototype_memory.initialized = True
+
         contrastive_losses = []
 
         for epoch in range(self.contrastive_epochs):
