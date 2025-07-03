@@ -116,7 +116,8 @@ class FusionTrainer:
 
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
-        self.prototype_memory = PrototypeMemory(num_classes, d_model)
+        # Use temperature < 1 to sharpen prototype soft labels
+        self.prototype_memory = PrototypeMemory(num_classes, d_model, temperature=0.5)
         self.center_loss_fn = CenterLoss(num_classes, d_model).to(device)
         self.optimizer_center = torch.optim.AdamW(self.center_loss_fn.parameters(), lr=lr_encoder)
 
