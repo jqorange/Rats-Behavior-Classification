@@ -347,6 +347,7 @@ class PrototypeMemory(nn.Module):
             return (loss * weights).mean()
         else:
             log_probs = F.log_softmax(logits, dim=-1)
+            targets = targets.clamp(min=1e-6)  # 避免 log(0)
             return F.kl_div(log_probs, targets, reduction="batchmean")
 
 
