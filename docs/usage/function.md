@@ -58,6 +58,7 @@ Below is a high level summary of the public functions and class methods found in
 * **PrototypeMemory.assign_labels** – assign pseudo labels based on cosine similarity.
 * **PrototypeMemory.update** – update prototypes using labelled or pseudo labelled features.
 * **PrototypeMemory.forward** – soft alignment loss between features and prototypes.
+* **prototype_repulsion_loss** – penalise similarity to incorrect prototypes.
 
 ## models/masking.py
 * **generate_continuous_mask** – drop contiguous blocks of frames.
