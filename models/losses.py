@@ -359,13 +359,17 @@ def prototype_repulsion_loss(feats: torch.Tensor, targets: torch.Tensor,
     protos = F.normalize(prototypes, dim=-1)
 
     logits = torch.matmul(feats, protos.t())  # (B, C)
-    B, C = logits.shape
-    mask = torch.ones_like(logits, dtype=torch.bool)
-    mask[torch.arange(B), targets] = False
-    negative_logits = logits[mask]
+    if targets.dim() == 1:
+        B, C = logits.shape
+        mask = torch.ones_like(logits, dtype=torch.bool)
+        mask[torch.arange(B), targets] = False
+        negative_logits = logits[mask]
 
-    # Softplus grows when similarity to wrong prototypes is high
-    loss = F.softplus(negative_logits).mean()
+        # Softplus grows when similarity to wrong prototypes is high
+        loss = F.softplus(negative_logits).mean()
+    else:
+        weights = 1.0 - targets.float()
+        loss = (F.softplus(logits) * weights).sum() / weights.sum()
     return loss
 
 
@@ -384,15 +388,14 @@ def prototype_center_loss(features: torch.Tensor, labels: torch.Tensor,
     """
     B, T, D = features.shape
     feats = features.reshape(B * T, D)
-    labels = labels.float().unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
+    weights = labels.float().unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
 
-    mask = labels > 0
-    if mask.sum() == 0:
+    if weights.sum() == 0:
         return features.new_tensor(0.0)
 
     centers = prototypes.to(features.device).unsqueeze(0).expand(B * T, -1, -1)
     diff = feats.unsqueeze(1) - centers
     dist = (diff.pow(2).sum(-1) + 1e-6).sqrt()
-    loss = (dist * mask).sum() / mask.sum()
+    loss = (dist * weights).sum() / weights.sum()
     return loss
 
