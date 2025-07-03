@@ -368,3 +368,31 @@ def prototype_repulsion_loss(feats: torch.Tensor, targets: torch.Tensor,
     loss = F.softplus(negative_logits).mean()
     return loss
 
+
+def prototype_center_loss(features: torch.Tensor, labels: torch.Tensor,
+                          prototypes: torch.Tensor) -> torch.Tensor:
+    """Center loss computed against fixed class prototypes.
+
+    Args:
+        features: (B, T, D) sequence features from the encoder.
+        labels: (B, C) multi-hot labels or one-hot pseudo labels.
+        prototypes: (C, D) class prototypes to use as centers.
+
+    Returns:
+        Scalar center loss encouraging features to stay close to their
+        corresponding prototypes.
+    """
+    B, T, D = features.shape
+    feats = features.reshape(B * T, D)
+    labels = labels.float().unsqueeze(1).expand(-1, T, -1).reshape(B * T, -1)
+
+    mask = labels > 0
+    if mask.sum() == 0:
+        return features.new_tensor(0.0)
+
+    centers = prototypes.to(features.device).unsqueeze(0).expand(B * T, -1, -1)
+    diff = feats.unsqueeze(1) - centers
+    dist = (diff.pow(2).sum(-1) + 1e-6).sqrt()
+    loss = (dist * mask).sum() / mask.sum()
+    return loss
+
