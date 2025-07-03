@@ -12,6 +12,7 @@ from models.losses import (
     PrototypeMemory,
     CenterLoss,
     prototype_repulsion_loss,
+    prototype_center_loss,
 )
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
@@ -435,8 +436,14 @@ class FusionTrainer:
                     pseudo = self.prototype_memory.assign_labels(pooled_u.detach())
                     proto_loss = self.prototype_memory(pooled_u, pseudo)
 
-                    center_sup = self.center_loss_fn(f_s, y_s.float()) if sup_loader is not None else torch.tensor(0.0, device=self.device)
-                    center_unsup = self.center_loss_fn(f_u, F.one_hot(pseudo, num_classes=self.num_classes).float())
+                    center_sup = prototype_center_loss(
+                        f_s, y_s.float(), self.prototype_memory.prototypes
+                    ) if sup_loader is not None else torch.tensor(0.0, device=self.device)
+                    center_unsup = prototype_center_loss(
+                        f_u,
+                        F.one_hot(pseudo, num_classes=self.num_classes).float(),
+                        self.prototype_memory.prototypes,
+                    )
                     center_loss = center_sup + center_unsup
 
                     rep_sup = prototype_repulsion_loss(pooled_s, y_s.argmax(dim=1), self.prototype_memory.prototypes) if sup_loader is not None else torch.tensor(0.0, device=self.device)
