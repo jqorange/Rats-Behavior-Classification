@@ -26,11 +26,9 @@ Training proceeds in three distinct stages:
 2. **Stage 2 – Session Alignment**
    * Encoders are frozen; a small adapter aligns sessions while preserving their structure with a contrastive loss.
    * A supervised contrastive loss attracts samples with overlapping labels across sessions.
-3. **Stage 3 – Prototype Refinement**
+3. **Stage 3 – Fine‑Tuning**
    * All parameters are unfrozen.
-   * Unsupervised, supervised and prototype losses are combined using a soft alignment objective.
-   * Pseudo labels are iteratively refined via similarity to class prototypes.
-   * Prototype repulsion discourages similarity to incorrect prototypes.
+   * Supervised and unsupervised contrastive losses are combined.
 
 After these stages an MLP classifier is trained. High confidence predictions are added as new training samples to further improve performance.
 
