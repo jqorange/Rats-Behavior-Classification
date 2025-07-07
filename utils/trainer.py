@@ -9,10 +9,7 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tqdm
 from models.losses import (
     compute_contrastive_losses,
-    PrototypeMemory,
-    CenterLoss,
-    prototype_repulsion_loss,
-    prototype_center_loss,
+    CenterLoss
 )
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
@@ -117,7 +114,6 @@ class FusionTrainer:
         # Loss function
         self.bce_loss = nn.BCEWithLogitsLoss()
         # Use temperature < 1 to sharpen prototype soft labels
-        self.prototype_memory = PrototypeMemory(num_classes, d_model, temperature=0.5)
         self.center_loss_fn = CenterLoss(num_classes, d_model).to(device)
         self.optimizer_center = torch.optim.AdamW(self.center_loss_fn.parameters(), lr=lr_encoder)
 
