@@ -383,8 +383,16 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'unsup': 0.0,
+                'proto': 0.0,
                 'total': 0.0,
             }
+            pseudo_feats_epoch = []
+            pseudo_labels_epoch = []
+            if not hasattr(self, 'stage2_prototypes'):
+                self.stage2_prototypes = self.compute_prototypes(
+                    train_data_sup_A, train_data_sup_B, labels_sup
+                )
+            prototypes = self.stage2_prototypes
             unsup_iter = iter(unsup_loader)
 
             for _ in tqdm.tqdm(range(len(unsup_loader)), desc=f'Stage3 Epoch {epoch+1}/{self.contrastive_epochs}'):
@@ -417,10 +425,35 @@ class FusionTrainer:
                         sup_loss = compute_contrastive_losses(
                             self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True, stage=3
                         )
+                        pooled_s = f_s.max(dim=1).values
+                        logits_sup = torch.matmul(
+                            F.normalize(pooled_s, dim=-1),
+                            F.normalize(prototypes, dim=-1).T,
+                        )
+                        target_sup = y_s.argmax(dim=1)
+                        proto_sup = F.cross_entropy(logits_sup, target_sup)
                     else:
                         sup_loss = torch.tensor(0.0, device=self.device)
+                        proto_sup = torch.tensor(0.0, device=self.device)
+                        pooled_s = None
 
-                loss = 0.2 * sup_loss + 0.6 * unsup_loss
+                    pooled_u = f_u.max(dim=1).values
+                    sims = torch.matmul(
+                        F.normalize(pooled_u, dim=-1),
+                        F.normalize(prototypes, dim=-1).T,
+                    )
+                    max_sims, pseudo = sims.max(dim=1)
+                    mask_h = max_sims > 0.9
+                    if mask_h.any():
+                        proto_unsup = F.cross_entropy(sims[mask_h], pseudo[mask_h])
+                        pseudo_feats_epoch.append(pooled_u[mask_h].detach())
+                        pseudo_labels_epoch.append(pseudo[mask_h].detach())
+                    else:
+                        proto_unsup = torch.tensor(0.0, device=self.device)
+
+                    proto_loss = proto_sup + proto_unsup
+
+                loss = 0.2 * sup_loss + 0.7 * unsup_loss + 0.3 * proto_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -433,6 +466,7 @@ class FusionTrainer:
 
 
                 epoch_losses['unsup'] += unsup_loss.item()
+                epoch_losses['proto'] += proto_loss.item()
                 epoch_losses['total'] += loss.item()
                 if sup_loader is not None:
                     epoch_losses['sup'] += sup_loss.item()
@@ -444,8 +478,18 @@ class FusionTrainer:
 
             if verbose:
                 print(
-                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}"
+                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}"
                 )
+
+            if pseudo_feats_epoch:
+                pseudo_feats_cat = torch.cat(pseudo_feats_epoch, dim=0)
+                pseudo_labels_cat = torch.cat(pseudo_labels_epoch, dim=0)
+                self.stage2_prototypes = self.compute_prototypes(
+                    train_data_sup_A, train_data_sup_B, labels_sup,
+                    extra_feats=pseudo_feats_cat,
+                    extra_labels=pseudo_labels_cat,
+                )
+
             self.n_epochs += 1
 
         return contrastive_losses
