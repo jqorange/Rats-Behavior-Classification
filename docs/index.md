@@ -28,7 +28,8 @@ Training proceeds in three distinct stages:
    * A supervised contrastive loss attracts samples with overlapping labels across sessions.
 3. **Stage 3 – Fine‑Tuning**
    * All parameters are unfrozen.
-   * Supervised and unsupervised contrastive losses are combined.
+   * Samples with real labels and high‑confidence pseudo labels (≥0.95 similarity) are trained together with supervised contrastive learning using heavy Gaussian noise.
+   * Prototype loss still follows a FixMatch style pseudo‑labelling scheme.
 
 After these stages an MLP classifier is trained. High confidence predictions are added as new training samples to further improve performance.
 
