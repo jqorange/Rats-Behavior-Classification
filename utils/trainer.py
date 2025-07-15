@@ -9,7 +9,8 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import tqdm
 from models.losses import (
     compute_contrastive_losses,
-    CenterLoss
+    CenterLoss,
+    prototype_repulsion_loss,
 )
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
@@ -41,7 +42,8 @@ class FusionTrainer:
             n_all=3,
             use_amp=False,
             num_sessions=0,
-            projection_mode="aware"
+            projection_mode="aware",
+            proto_repulsion_weight=0.1,
     ):
         """
         Args:
@@ -74,6 +76,7 @@ class FusionTrainer:
         self.n_all = n_all
         self.d_model = d_model
         self.projection_mode = projection_mode
+        self.proto_repulsion_weight = proto_repulsion_weight
 
         # AMP settings
         self.use_amp = use_amp and torch.cuda.is_available()
@@ -207,6 +210,7 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'proto': 0.0,
+                'repul': 0.0,
                 'total': 0.0,
             }
             if stage == 'adapt':
@@ -396,6 +400,7 @@ class FusionTrainer:
                     train_data_sup_A, train_data_sup_B, labels_sup
                 )
             prototypes = self.stage2_prototypes
+            repulsion = prototype_repulsion_loss(prototypes)
             unsup_iter = iter(unsup_loader)
 
             for _ in tqdm.tqdm(range(len(unsup_loader)), desc=f'Stage3 Epoch {epoch+1}/{self.contrastive_epochs}'):
@@ -476,7 +481,7 @@ class FusionTrainer:
                     sup_total = sup_loss + sup_pseudo
                     proto_loss = proto_sup + proto_unsup
 
-                loss = 0.5 * sup_total + 0.5 * proto_loss
+                loss = 0.5 * sup_total + 0.5 * proto_loss + self.proto_repulsion_weight * repulsion
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -490,6 +495,7 @@ class FusionTrainer:
 
                 epoch_losses['sup'] += sup_total.item()
                 epoch_losses['proto'] += proto_loss.item()
+                epoch_losses['repul'] += repulsion.item()
                 epoch_losses['total'] += loss.item()
                 self.n_iters += 1
 
@@ -499,7 +505,9 @@ class FusionTrainer:
 
             if verbose:
                 print(
-                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}"
+                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, "
+                    f"Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}, "
+                    f"Repul={epoch_losses['repul']:.8f}"
                 )
 
             if pseudo_feats_epoch:

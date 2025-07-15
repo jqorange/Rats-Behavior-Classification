@@ -217,3 +217,25 @@ class CenterLoss(nn.Module):
         return loss
 
 
+def prototype_repulsion_loss(prototypes: torch.Tensor, margin: float = 0.5) -> torch.Tensor:
+    """Prototype repulsion encouraging different classes to be far apart.
+
+    Args:
+        prototypes: (C, D) tensor of class prototypes.
+        margin: cosine similarity margin before repulsion is applied.
+
+    Returns:
+        Scalar repulsion loss.
+    """
+    if prototypes.numel() == 0:
+        return prototypes.new_tensor(0.0)
+
+    # Normalise to compute cosine similarity
+    protos = F.normalize(prototypes, dim=-1)
+    sim = torch.matmul(protos, protos.T)
+    mask = ~torch.eye(sim.size(0), dtype=torch.bool, device=sim.device)
+    sim = sim[mask]
+    loss = F.relu(sim - margin).mean()
+    return loss
+
+
