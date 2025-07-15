@@ -18,7 +18,7 @@ def latest_checkpoint(path):
         if m:
             num = int(m.group(1))
             # latest = max(latest, num)
-            latest = 790
+            latest = 787
     return latest
 
 

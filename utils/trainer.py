@@ -420,8 +420,9 @@ class FusionTrainer:
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
                     # ===== Supervised batch =====
                     if sup_loader is not None:
-                        noise_s = torch.randn_like(xA_s) * 0.2
-                        f_s = self.encoder_fusion(xA_s + noise_s, xB_s + noise_s, id_s)
+                        noise_A_s = torch.randn_like(xA_s) * 0.2
+                        noise_B_s = torch.randn_like(xB_s) * 0.2
+                        f_s = self.encoder_fusion(xA_s + noise_A_s, xB_s + noise_B_s, id_s)
                         sup_loss = compute_contrastive_losses(
                             self, None, None, y_s, f_s, id_s, is_supervised=True, stage=3
                         )
@@ -475,7 +476,7 @@ class FusionTrainer:
                     sup_total = sup_loss + sup_pseudo
                     proto_loss = proto_sup + proto_unsup
 
-                loss = 0.7 * sup_total + 0.3 * proto_loss
+                loss = 0.5 * sup_total + 0.5 * proto_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:

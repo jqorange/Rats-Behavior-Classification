@@ -266,7 +266,7 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
     final_ds = TensorDataset(torch.from_numpy(all_x), torch.from_numpy(all_y))
     final_loader = DataLoader(final_ds, batch_size=args.batch_size, shuffle=True)
 
-    for epoch in tqdm.tqdm(range(50)):
+    for epoch in tqdm.tqdm(range(40)):
         model.train()
         for x, y in final_loader:
             x = x.to(device)

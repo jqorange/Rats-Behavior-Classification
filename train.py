@@ -45,7 +45,7 @@ def main(resume=True):
         'contrastive_epochs': 1,
         'mlp_epochs': 1,
         'save_path': save_path,
-        'save_gap': 5,
+        'save_gap': 1,
         'n_stable': 680,
         'n_adapted': 760,
         'n_all': 30000,
