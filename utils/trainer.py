@@ -198,10 +198,14 @@ class FusionTrainer:
             total_unsup_batches = len(unsup_loader)
 
         contrastive_losses = []
+        # ====== Stage 3 Training ======
+        # This phase discards the unsupervised contrastive cropping used in
+        # previous stages. Instead, it relies purely on supervised contrastive
+        # learning with heavy Gaussian noise.  Pseudo labels are generated in a
+        # FixMatch style using class prototypes.
         for epoch in range(self.contrastive_epochs):
             epoch_losses = {
                 'sup': 0.0,
-                'unsup': 0.0,
                 'proto': 0.0,
                 'total': 0.0,
             }
@@ -382,7 +386,6 @@ class FusionTrainer:
         for epoch in range(self.contrastive_epochs):
             epoch_losses = {
                 'sup': 0.0,
-                'unsup': 0.0,
                 'proto': 0.0,
                 'total': 0.0,
             }
@@ -415,15 +418,12 @@ class FusionTrainer:
                     xA_s = xB_s = y_s = id_s = None
 
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    f_u = self.encoder_fusion(xA_u, xB_u, id_u)
-                    unsup_loss = compute_contrastive_losses(
-                        self, xA_u, xB_u, None, f_u, id_u, is_supervised=False
-                    )
-
+                    # ===== Supervised batch =====
                     if sup_loader is not None:
-                        f_s = self.encoder_fusion(xA_s, xB_s, id_s)
+                        noise_s = torch.randn_like(xA_s) * 0.2
+                        f_s = self.encoder_fusion(xA_s + noise_s, xB_s + noise_s, id_s)
                         sup_loss = compute_contrastive_losses(
-                            self, xA_s, xB_s, y_s, f_s, id_s, is_supervised=True, stage=3
+                            self, None, None, y_s, f_s, id_s, is_supervised=True, stage=3
                         )
                         pooled_s = f_s.max(dim=1).values
                         logits_sup = torch.matmul(
@@ -435,25 +435,47 @@ class FusionTrainer:
                     else:
                         sup_loss = torch.tensor(0.0, device=self.device)
                         proto_sup = torch.tensor(0.0, device=self.device)
-                        pooled_s = None
 
-                    pooled_u = f_u.max(dim=1).values
+                    # ===== Unsupervised batch: FixMatch pseudo labelling =====
+                    weak_std, strong_std = 0.05, 0.2
+                    f_w = self.encoder_fusion(
+                        xA_u + torch.randn_like(xA_u) * weak_std,
+                        xB_u + torch.randn_like(xB_u) * weak_std,
+                        id_u,
+                    )
+                    f_su = self.encoder_fusion(
+                        xA_u + torch.randn_like(xA_u) * strong_std,
+                        xB_u + torch.randn_like(xB_u) * strong_std,
+                        id_u,
+                    )
+
+                    pooled_w = f_w.max(dim=1).values
                     sims = torch.matmul(
-                        F.normalize(pooled_u, dim=-1),
+                        F.normalize(pooled_w, dim=-1),
                         F.normalize(prototypes, dim=-1).T,
                     )
                     max_sims, pseudo = sims.max(dim=1)
-                    mask_h = max_sims > 0.9
+                    mask_h = max_sims > 0.95
                     if mask_h.any():
-                        proto_unsup = F.cross_entropy(sims[mask_h], pseudo[mask_h])
-                        pseudo_feats_epoch.append(pooled_u[mask_h].detach())
+                        pseudo_onehot = F.one_hot(pseudo[mask_h], num_classes=self.num_classes).float()
+                        sup_pseudo = compute_contrastive_losses(
+                            self, None, None, pseudo_onehot, f_su[mask_h], id_u[mask_h], is_supervised=True, stage=3
+                        )
+                        logits_strong = torch.matmul(
+                            F.normalize(f_su[mask_h].max(dim=1).values, dim=-1),
+                            F.normalize(prototypes, dim=-1).T,
+                        )
+                        proto_unsup = F.cross_entropy(logits_strong, pseudo[mask_h])
+                        pseudo_feats_epoch.append(f_su[mask_h].max(dim=1).values.detach())
                         pseudo_labels_epoch.append(pseudo[mask_h].detach())
                     else:
+                        sup_pseudo = torch.tensor(0.0, device=self.device)
                         proto_unsup = torch.tensor(0.0, device=self.device)
 
+                    sup_total = sup_loss + sup_pseudo
                     proto_loss = proto_sup + proto_unsup
 
-                loss = 0.2 * sup_loss + 0.7 * unsup_loss + 0.3 * proto_loss
+                loss = 0.7 * sup_total + 0.3 * proto_loss
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -465,11 +487,9 @@ class FusionTrainer:
                     self.optimizer_encoder.step()
 
 
-                epoch_losses['unsup'] += unsup_loss.item()
+                epoch_losses['sup'] += sup_total.item()
                 epoch_losses['proto'] += proto_loss.item()
                 epoch_losses['total'] += loss.item()
-                if sup_loader is not None:
-                    epoch_losses['sup'] += sup_loss.item()
                 self.n_iters += 1
 
             for k in epoch_losses:
@@ -478,7 +498,7 @@ class FusionTrainer:
 
             if verbose:
                 print(
-                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Unsup={epoch_losses['unsup']:.8f}, Proto={epoch_losses['proto']:.8f}"
+                    f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}"
                 )
 
             if pseudo_feats_epoch:
