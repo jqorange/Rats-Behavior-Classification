@@ -12,6 +12,7 @@ from models.losses import (
     CenterLoss,
     prototype_repulsion_loss,
 )
+import random
 from models.fusion import EncoderFusion
 from models.classifier import MLPClassifier
 from models.losses import multilabel_supcon_loss_bt, hierarchical_contrastive_loss
@@ -347,6 +348,24 @@ class FusionTrainer:
 
         return contrastive_losses
 
+    def amplitude_scale(self, x, scale_range=(0.8, 1.2)):
+        scale = torch.empty(x.shape[0], 1, 1, device=x.device).uniform_(*scale_range)
+        return x * scale
+
+    def amplitude_shift(self, x, shift_range=(-0.2, 0.2)):
+        shift = torch.empty(x.shape[0], 1, 1, device=x.device).uniform_(*shift_range)
+        return x + shift
+
+    def strong_augment(self, x):
+        # 高斯噪声
+        x = x + torch.randn_like(x) * 0.3
+        # 幅度扰动
+        if random.random() < 0.5:
+            x = self.amplitude_scale(x)
+        # 偏置扰动
+        if random.random() < 0.5:
+            x = self.amplitude_shift(x)
+        return x
     def train_stage3(self, train_data_A, train_data_B, train_ids,
                      train_data_sup_A, train_data_sup_B, sup_ids, labels_sup,
                      verbose=True):
@@ -391,6 +410,7 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'proto': 0.0,
+                'repul':0.0,
                 'total': 0.0,
             }
             pseudo_feats_epoch = []
@@ -443,15 +463,15 @@ class FusionTrainer:
                         proto_sup = torch.tensor(0.0, device=self.device)
 
                     # ===== Unsupervised batch: FixMatch pseudo labelling =====
-                    weak_std, strong_std = 0.05, 0.2
+                    weak_std = 0.05
                     f_w = self.encoder_fusion(
                         xA_u + torch.randn_like(xA_u) * weak_std,
                         xB_u + torch.randn_like(xB_u) * weak_std,
                         id_u,
                     )
                     f_su = self.encoder_fusion(
-                        xA_u + torch.randn_like(xA_u) * strong_std,
-                        xB_u + torch.randn_like(xB_u) * strong_std,
+                        self.strong_augment(xA_u),
+                        self.strong_augment(xB_u),
                         id_u,
                     )
 

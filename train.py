@@ -14,7 +14,6 @@ def main(resume=True):
     data_path = r"D:\Jiaqi\Datasets\Rats\TrainData"
     save_path = r"./checkpoints"
     session_name = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
-    # 检查路径是否存在
     if not os.path.exists(data_path):
         print(f"❌ 数据路径不存在: {data_path}")
         print("请检查数据路径是否正确")
