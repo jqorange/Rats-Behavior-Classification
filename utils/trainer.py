@@ -45,6 +45,7 @@ class FusionTrainer:
             num_sessions=0,
             projection_mode="aware",
             proto_repulsion_weight=0.1,
+            kl_weight=0.1,
     ):
         """
         Args:
@@ -63,6 +64,8 @@ class FusionTrainer:
             contrastive_epochs: Number of epochs for contrastive learning phase
             mlp_epochs: Number of epochs for MLP training phase
             projection_mode: Adapter mode for the final projection layer
+            proto_repulsion_weight: Weight for prototype repulsion loss
+            kl_weight: Weight for KL divergence distribution alignment
         """
         self.device = device
         self.batch_size = batch_size
@@ -78,6 +81,7 @@ class FusionTrainer:
         self.d_model = d_model
         self.projection_mode = projection_mode
         self.proto_repulsion_weight = proto_repulsion_weight
+        self.kl_weight = kl_weight
 
         # AMP settings
         self.use_amp = use_amp and torch.cuda.is_available()
@@ -403,6 +407,7 @@ class FusionTrainer:
             sup_iter = iter(sup_loader)
         else:
             sup_loader = None
+            label_dist = torch.full((self.num_classes,), 1.0 / self.num_classes, device=self.device)
 
         contrastive_losses = []
 
@@ -410,7 +415,8 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'proto': 0.0,
-                'repul':0.0,
+                'repul': 0.0,
+                'kl': 0.0,
                 'total': 0.0,
             }
             pseudo_feats_epoch = []
@@ -501,7 +507,16 @@ class FusionTrainer:
                     sup_total = sup_loss + sup_pseudo
                     proto_loss = proto_sup + proto_unsup
 
-                loss = 0.5 * sup_total + 0.5 * proto_loss + self.proto_repulsion_weight * repulsion
+                    probs = F.softmax(sims, dim=1)
+                    avg_probs = probs.mean(dim=0)
+                    kl_loss = F.kl_div(torch.log(avg_probs + 1e-6), label_dist, reduction='batchmean')
+
+                loss = (
+                    0.5 * sup_total
+                    + 0.5 * proto_loss
+                    + self.proto_repulsion_weight * repulsion
+                    + self.kl_weight * kl_loss
+                )
 
                 self.optimizer_encoder.zero_grad()
                 if self.use_amp:
@@ -516,6 +531,7 @@ class FusionTrainer:
                 epoch_losses['sup'] += sup_total.item()
                 epoch_losses['proto'] += proto_loss.item()
                 epoch_losses['repul'] += repulsion.item()
+                epoch_losses['kl'] += kl_loss.item()
                 epoch_losses['total'] += loss.item()
                 self.n_iters += 1
 
@@ -527,7 +543,7 @@ class FusionTrainer:
                 print(
                     f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, "
                     f"Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}, "
-                    f"Repul={epoch_losses['repul']:.8f}"
+                    f"Repul={epoch_losses['repul']:.8f}, KL={epoch_losses['kl']:.8f}"
                 )
 
             if pseudo_feats_epoch:

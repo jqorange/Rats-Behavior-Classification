@@ -132,7 +132,7 @@ Below is a high level summary of the public functions and class methods found in
 ## utils/trainer.py
 * **FusionTrainer.__init__** – build encoders, classifier and optimisers.
 * **train_contrastive_phase** – run a contrastive learning stage.
-* **train_stage3** – stage 3 training combining supervised and unsupervised losses.
+* **train_stage3** – stage 3 training combining supervised and unsupervised losses with KL distribution alignment.
 * **train_contrastive_multi_session** – unsupervised training mixing sessions per batch.
 * **train_mlp_phase** – supervised MLP training after the encoders are frozen.
 * **fit** – execute the full three‑stage curriculum.
