@@ -37,7 +37,7 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None,
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     lab_file = os.path.join(label_dir, session, f"label_{session}.csv")
     reps = np.load(rep_file)
-    reps = create_context_windows(reps)
+    reps = create_context_windows(reps, window_size=51, step=5)
     labels = pd.read_csv(lab_file)
     labels = labels[LABEL_COLUMNS].values
     labels = normalize_labels(labels)
@@ -58,22 +58,44 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None,
     elif type=="test":
         return reps[n:].astype(np.float32), labels[n:].astype(np.float32)
 
+def load_unlabeled_data(rep_dir: str, session: str, segments=None):
+    rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
+    reps = np.load(rep_file)
+    reps = create_context_windows(reps, window_size=51, step=5)
+    if segments:
+        labeled_idx = []
+        for s, e in segments:
+            labeled_idx.extend(list(range(s, e + 1)))
+        labeled_idx = [i for i in labeled_idx if i < len(reps)]
+        mask = np.ones(len(reps), dtype=bool)
+        mask[labeled_idx] = False
+        reps = reps[mask]
+    return reps.astype(np.float32)
+
 def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs):
     train_x, train_y = [], []
+    unlabeled_x = []
     test_x, test_y = [], []
     for s in train_sessions:
-        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s),"train")
+        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s), "train")
         train_x.append(x)
         train_y.append(y)
+        u = load_unlabeled_data(rep_dir, s, segs.get(s))
+        if len(u) > 0:
+            unlabeled_x.append(u)
     for s in test_sessions:
-        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s),"test")
+        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s), "test")
         test_x.append(x)
         test_y.append(y)
     train_x = np.concatenate(train_x, axis=0)
     train_y = np.concatenate(train_y, axis=0)
     test_x = np.concatenate(test_x, axis=0)
     test_y = np.concatenate(test_y, axis=0)
-    return train_x, train_y, test_x, test_y
+    if unlabeled_x:
+        unlabeled_x = np.concatenate(unlabeled_x, axis=0)
+    else:
+        unlabeled_x = np.empty((0, train_x.shape[1], train_x.shape[2]), dtype=np.float32)
+    return train_x, train_y, unlabeled_x, test_x, test_y
 
 def evaluate(model, loader, device):
     model.eval()
@@ -102,27 +124,82 @@ def evaluate(model, loader, device):
     acc = (preds == labels).float().mean().item()
     return acc
 
-def train(train_loader, test_loader, input_dim, device, args):
-    model = TemporalSoftmaxClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    for epoch in range(args.epochs):
-        model.train()
-        for x, y in train_loader:
-            x = x.to(device)
-            y = y.to(device)
-            opt.zero_grad()
-            logits = model(x)
-            logp = torch.log_softmax(logits, dim=1)
-            loss = -(y * logp).sum(dim=1).mean()
-            loss.backward()
-            opt.step()
+def pseudo_label(model, data, threshold, batch_size, device):
+    if len(data) == 0:
+        return (
+            np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32),
+            np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32),
+            data,
+        )
+    dataset = TensorDataset(torch.from_numpy(data))
+    loader = DataLoader(dataset, batch_size=batch_size)
+    keep_indices = []
+    preds = []
+    start = 0
+    with torch.no_grad():
+        for batch in loader:
+            x = batch[0].to(device)
+            probs = torch.softmax(model(x), dim=1).cpu().numpy()
+            confs = np.max(probs, axis=1)
+            labels = np.argmax(probs, axis=1)
+            mask = confs >= threshold
+            if np.any(mask):
+                idx = np.nonzero(mask)[0] + start
+                keep_indices.extend(idx.tolist())
+                one_hot = np.eye(len(LABEL_COLUMNS))[labels[mask]]
+                preds.append(one_hot.astype(np.float32))
+            start += len(batch[0])
+    if keep_indices:
+        pseudo_x = data[keep_indices]
+        pseudo_y = np.concatenate(preds, axis=0)
+        remaining_mask = np.ones(len(data), dtype=bool)
+        remaining_mask[keep_indices] = False
+        remaining = data[remaining_mask]
+    else:
+        pseudo_x = np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32)
+        pseudo_y = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
+        remaining = data
+    return pseudo_x, pseudo_y, remaining
+
+
+def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, device, args):
+    pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
+    pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
+    thresholds = np.linspace(0.9, 0.5, 10)
+    model = None
+    for i, thr in enumerate(thresholds):
+        print(f"\n=== Round {i+1}/10 | Threshold {thr:.2f} ===")
+        combined_x = np.concatenate([train_x, pseudo_x_total], axis=0)
+        combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
+        train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
+        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
+        model = TemporalSoftmaxClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+        for epoch in range(args.epochs):
+            model.train()
+            for x, y in train_loader:
+                x = x.to(device)
+                y = y.to(device)
+                opt.zero_grad()
+                logits = model(x)
+                logp = torch.log_softmax(logits, dim=1)
+                loss = -(y * logp).sum(dim=1).mean()
+                loss.backward()
+                opt.step()
         acc = evaluate(model, test_loader, device)
-        print(f"Epoch {epoch+1}/{args.epochs} - Test Acc: {acc:.4f}")
+        print(f"Round {i+1} - Test Acc: {acc:.4f}")
+        if i < len(thresholds) - 1 and len(unlabeled_x) > 0:
+            new_x, new_y, unlabeled_x = pseudo_label(model, unlabeled_x, thr, args.batch_size, device)
+            print(f"  Pseudo labeled samples added: {len(new_x)}")
+            if len(new_x) > 0:
+                pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
+                pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
+        torch.save(model.state_dict(), os.path.join(args.model_dir, f"seq_classifier_{i}.pt"))
     return model
 
 def main(args):
     segs = load_valid_segments(os.path.join(args.label_path, "results.txt"))
-    train_x, train_y, test_x, test_y = build_datasets(
+    train_x, train_y, unlabeled_x, test_x, test_y = build_datasets(
         args.train_sessions,
         args.test_sessions,
         args.rep_dir,
@@ -131,13 +208,11 @@ def main(args):
     )
     window_size = train_x.shape[1]
     input_dim = train_x.shape[2]
-    train_ds = TensorDataset(torch.from_numpy(train_x), torch.from_numpy(train_y))
     test_ds = TensorDataset(torch.from_numpy(test_x), torch.from_numpy(test_y))
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     os.makedirs(args.model_dir, exist_ok=True)
-    model = train(train_loader, test_loader, input_dim, device, args)
+    model = self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, device, args)
     torch.save(model.state_dict(), os.path.join(args.model_dir, "seq_classifier.pt"))
 
 if __name__ == "__main__":
@@ -149,6 +224,6 @@ if __name__ == "__main__":
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--epochs", type=int, default=30)
     args = parser.parse_args()
     main(args)
