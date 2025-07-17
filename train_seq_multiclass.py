@@ -27,13 +27,13 @@ def load_valid_segments(results_path: str) -> dict:
     return segs
 
 def normalize_labels(labels: np.ndarray) -> np.ndarray:
-    sums = labels.sum(axis=1, keepdims=True)
+    sums = labels.sum(axis=1)
     mask = sums > 0
     labels = labels.astype(np.float32)
-    labels[mask] = labels[mask] / sums[mask]
+    labels[mask] = labels[mask] / (sums[mask].reshape(-1, 1))
     return labels
 
-def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None):
+def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None, type=None):
     rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
     lab_file = os.path.join(label_dir, session, f"label_{session}.csv")
     reps = np.load(rep_file)
@@ -52,17 +52,21 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
         idx = [i for i in idx if i < len(reps)]
         reps = reps[idx]
         labels = labels[idx]
-    return reps.astype(np.float32), labels.astype(np.float32)
+        n = int(0.8 * len(reps))
+    if type=="train":
+        return reps[:n].astype(np.float32), labels[:n].astype(np.float32)
+    elif type=="test":
+        return reps[n:].astype(np.float32), labels[n:].astype(np.float32)
 
 def build_datasets(train_sessions, test_sessions, rep_dir, label_dir, segs):
     train_x, train_y = [], []
     test_x, test_y = [], []
     for s in train_sessions:
-        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s))
+        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s),"train")
         train_x.append(x)
         train_y.append(y)
     for s in test_sessions:
-        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s))
+        x, y = load_session_data(rep_dir, label_dir, s, segs.get(s),"test")
         test_x.append(x)
         test_y.append(y)
     train_x = np.concatenate(train_x, axis=0)
@@ -80,8 +84,19 @@ def evaluate(model, loader, device):
             y = y.to(device)
             logits = model(x)
             prob = torch.softmax(logits, dim=1)
+
+            # === 新增：处理 y ===
+            y_np = y.cpu().numpy()
+            for i in range(y_np.shape[0]):
+                idx = np.where(y_np[i] > 0.3)[0]
+                if len(idx) > 1:
+                    y_np[i] = np.zeros_like(y_np[i])
+                    y_np[i][idx] = 1.0 / len(idx)
+            y_proc = torch.from_numpy(y_np).to(device)
+            # ======================
+
             preds.append(prob.argmax(dim=1).cpu())
-            labels.append(y.argmax(dim=1).cpu())
+            labels.append(y_proc.argmax(dim=1).cpu())
     preds = torch.cat(preds)
     labels = torch.cat(labels)
     acc = (preds == labels).float().mean().item()
@@ -129,11 +144,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train temporal classifier with softmax output")
     parser.add_argument("--rep_dir", default="./representations", help="Representation directory")
     parser.add_argument("--label_path", default="D:\\Jiaqi\\Datasets\\Rats\\TrainData/labels", help="Path to labels directory")
-    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"])
-    parser.add_argument("--test_sessions", nargs="+", default=["F6D5_outdoor_1"])
+    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F3D6_outdoor"])
+    parser.add_argument("--test_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F3D6_outdoor"])
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=50)
     args = parser.parse_args()
     main(args)
