@@ -183,7 +183,7 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
 
     pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
-    base_thresholds = np.linspace(0.95, 0.6, 10)
+    base_thresholds = np.linspace(0.8, 0.7, 10)
 
     model = TemporalClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
@@ -220,7 +220,7 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
         train_ds = TensorDataset(torch.from_numpy(combined_x), torch.from_numpy(combined_y))
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
 
-        for epoch in tqdm.tqdm(range(50)):
+        for epoch in tqdm.tqdm(range(10)):
             model.train()
             for x, y in train_loader:
                 x = x.to(device)
@@ -266,7 +266,7 @@ def self_training(train_x, train_y, unlabeled_x, test_unlabeled_x, test_loader, 
     final_ds = TensorDataset(torch.from_numpy(all_x), torch.from_numpy(all_y))
     final_loader = DataLoader(final_ds, batch_size=args.batch_size, shuffle=True)
 
-    for epoch in tqdm.tqdm(range(40)):
+    for epoch in tqdm.tqdm(range(50)):
         model.train()
         for x, y in final_loader:
             x = x.to(device)
@@ -324,7 +324,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"])
     parser.add_argument("--test_sessions", nargs="+", default=["F6D5_outdoor_1"])
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument(
         "--frames_per_class",

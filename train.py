@@ -40,7 +40,7 @@ def main(resume=True):
         'hidden_dim': 4,
         'lr_encoder': 0.0001,
         'lr_classifier': 0.001,
-        'batch_size': 512,
+        'batch_size': 1024,
         'contrastive_epochs': 1,
         'mlp_epochs': 1,
         'save_path': save_path,

@@ -27,4 +27,6 @@ class TemporalClassifier(nn.Module):
         x = self.tcn(x.transpose(1, 2)).transpose(1, 2)
         x = self.trans(x)
         x = self.pool(x.transpose(1, 2)).squeeze(-1)
-        return self.fc(x)
+        x = self.fc(x)
+        x = torch.sigmoid(x)
+        return x

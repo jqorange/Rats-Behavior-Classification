@@ -44,8 +44,8 @@ class FusionTrainer:
             use_amp=False,
             num_sessions=0,
             projection_mode="aware",
-            proto_repulsion_weight=0.1,
-            kl_weight=0.1,
+            proto_repulsion_weight=0.2,
+            kl_weight=0.5,
     ):
         """
         Args:
@@ -405,6 +405,8 @@ class FusionTrainer:
                 drop_last=True,
             )
             sup_iter = iter(sup_loader)
+            label_dist_np = label_counts / label_counts.sum()
+            label_dist = torch.from_numpy(label_dist_np).to(self.device).float()
         else:
             sup_loader = None
             label_dist = torch.full((self.num_classes,), 1.0 / self.num_classes, device=self.device)
@@ -554,6 +556,7 @@ class FusionTrainer:
                     extra_feats=pseudo_feats_cat,
                     extra_labels=pseudo_labels_cat,
                 )
+
 
             self.n_epochs += 1
 
