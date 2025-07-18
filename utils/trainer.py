@@ -417,6 +417,7 @@ class FusionTrainer:
             epoch_losses = {
                 'sup': 0.0,
                 'proto': 0.0,
+                'unsup': 0.0,
                 'repul': 0.0,
                 'kl': 0.0,
                 'total': 0.0,
@@ -488,6 +489,9 @@ class FusionTrainer:
                         F.normalize(pooled_w, dim=-1),
                         F.normalize(prototypes, dim=-1).T,
                     )
+                    unsup_loss = compute_contrastive_losses(
+                        self, xA_u, xB_u, None, None, id_u, is_supervised=False
+                    )
                     max_sims, pseudo = sims.max(dim=1)
                     mask_h = max_sims > 0.95
                     if mask_h.any():
@@ -516,6 +520,7 @@ class FusionTrainer:
                 loss = (
                     0.5 * sup_total
                     + 0.5 * proto_loss
+                    + 0.5 * unsup_loss
                     + self.proto_repulsion_weight * repulsion
                     + self.kl_weight * kl_loss
                 )
@@ -532,6 +537,7 @@ class FusionTrainer:
 
                 epoch_losses['sup'] += sup_total.item()
                 epoch_losses['proto'] += proto_loss.item()
+                epoch_losses['unsup'] += unsup_loss.item()
                 epoch_losses['repul'] += repulsion.item()
                 epoch_losses['kl'] += kl_loss.item()
                 epoch_losses['total'] += loss.item()
@@ -544,7 +550,7 @@ class FusionTrainer:
             if verbose:
                 print(
                     f"Stage3 Epoch {epoch + 1}: Total={epoch_losses['total']:.8f}, "
-                    f"Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}, "
+                    f"Sup={epoch_losses['sup']:.8f}, Proto={epoch_losses['proto']:.8f}, Unsup={epoch_losses['unsup']:.8f}, "
                     f"Repul={epoch_losses['repul']:.8f}, KL={epoch_losses['kl']:.8f}"
                 )
 
