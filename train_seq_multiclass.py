@@ -7,10 +7,10 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from models.temporal_softmax_classifier import TemporalSoftmaxClassifier
 from utils.context import create_context_windows
-
+from tqdm import tqdm
 LABEL_COLUMNS = [
     "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
-    "still", "eating", "grooming", "local_search", "turn_left",
+    "still", "eating", "local_search", "turn_left",
     "turn_right",
 ]
 
@@ -165,7 +165,7 @@ def pseudo_label(model, data, threshold, batch_size, device):
 def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_size, device, args):
     pseudo_x_total = np.empty((0, window_size, input_dim), dtype=np.float32)
     pseudo_y_total = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
-    thresholds = np.linspace(0.9, 0.5, 10)
+    thresholds = np.linspace(0.98, 0.8, 10)
     model = None
     for i, thr in enumerate(thresholds):
         print(f"\n=== Round {i+1}/10 | Threshold {thr:.2f} ===")
@@ -175,7 +175,7 @@ def self_training(train_x, train_y, unlabeled_x, test_loader, input_dim, window_
         train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
         model = TemporalSoftmaxClassifier(input_dim, num_classes=len(LABEL_COLUMNS)).to(device)
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-        for epoch in range(args.epochs):
+        for epoch in tqdm(range(args.epochs)):
             model.train()
             for x, y in train_loader:
                 x = x.to(device)
@@ -219,8 +219,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train temporal classifier with softmax output")
     parser.add_argument("--rep_dir", default="./representations", help="Representation directory")
     parser.add_argument("--label_path", default="D:\\Jiaqi\\Datasets\\Rats\\TrainData/labels", help="Path to labels directory")
-    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F3D6_outdoor"])
-    parser.add_argument("--test_sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F3D6_outdoor"])
+    parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor"])
+    parser.add_argument("--test_sessions", nargs="+", default=["F3D5_outdoor"])
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
     parser.add_argument("--batch_size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-3)

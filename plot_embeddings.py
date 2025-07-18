@@ -12,12 +12,7 @@ from collections import defaultdict
 import plotly.graph_objects as go
 
 
-def load_channel_names(base_path, session):
-    csv_path = os.path.join(base_path, "labels", session, f"label_{session}.csv")
-    if os.path.exists(csv_path):
-        df = pd.read_csv(csv_path)
-        return df.columns[1:13].tolist()
-    return []
+
 
 
 def load_label_ranges(results_txt_path):
@@ -98,7 +93,11 @@ def main(args):
     label_ranges = {}
     if args.if_split:
         label_ranges = load_label_ranges(os.path.join(args.data_path, "labels", "results.txt"))
-
+    LABEL_COLUMNS = [
+        "walk", "jump", "aiming", "scratch", "rearing", "stand_up",
+        "still", "eating", "local_search", "turn_left",
+        "turn_right",
+    ]
     for s in sessions:
         rep_file = os.path.join(args.rep_dir, f"{s}_repr.npy")
         if not os.path.exists(rep_file):
@@ -106,9 +105,10 @@ def main(args):
             continue
         reps = np.load(rep_file)
 
-        label_file = os.path.join(args.data_path, "labels", s, f"label_{s}.csv")
+        # label_file = os.path.join(args.data_path, "labels", s, f"label_{s}.csv")
+        label_file = f"Predictions_results/{s}_modified.csv"
         if os.path.exists(label_file):
-            labels = pd.read_csv(label_file).values[:, 1:13]
+            labels = pd.read_csv(label_file)[LABEL_COLUMNS].values
             min_len = min(len(labels), len(reps))
             labels = labels[:min_len]
             reps = reps[:min_len]
@@ -132,8 +132,6 @@ def main(args):
             continue
 
         rep_list.append(reps)
-        if not channel_names:
-            channel_names = load_channel_names(args.data_path, s)
 
     if not rep_list:
         print("No representations loaded")
@@ -147,7 +145,7 @@ def main(args):
     pca = PCA(n_components=3)
     data_pca = pca.fit_transform(data_scaled)
 
-    channel_names = channel_names or [str(i) for i in range(labels.shape[1] if labels is not None else 0)]
+    channel_names = LABEL_COLUMNS
     channel_names.append("NAN")
 
     custom_colors = [
@@ -195,18 +193,18 @@ def main(args):
     )
     fig.show()
 
-    if labels is not None:
-        metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])
-        print("\n=== Cluster Evaluation Metrics ===")
-        for k, v in metrics.items():
-            print(f"{k}: {v:.4f}")
+    # if labels is not None:
+    #     metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])
+    #     print("\n=== Cluster Evaluation Metrics ===")
+    #     for k, v in metrics.items():
+    #         print(f"{k}: {v:.4f}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot representations with evaluation")
     parser.add_argument("--data_path", default="D:\\Jiaqi\\Datasets\\Rats\\TrainData", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F5D2_outdoor","F5D10_outdoor"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
-    parser.add_argument("--if_split", default=True, help="If true, only use last 20% of labeled data for evaluation")
+    parser.add_argument("--if_split", default=False, help="If true, only use last 20% of labeled data for evaluation")
     args = parser.parse_args()
     main(args)
