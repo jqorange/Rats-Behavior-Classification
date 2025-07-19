@@ -1107,9 +1107,11 @@ class FusionTrainer:
                 k: v for k, v in self.encoder_fusion.encoderB.state_dict().items()
                 if not k.startswith("adapter.")
             },
-            'cross_attn': self.encoder_fusion.cross_attn.state_dict(),
-            'gate': self.encoder_fusion.gate.state_dict(),
-            'norm': self.encoder_fusion.norm.state_dict(),
+            'cross_attn1': self.encoder_fusion.cross_attn1.state_dict(),
+            'cross_attn2': self.encoder_fusion.cross_attn2.state_dict(),
+            'gate1': self.encoder_fusion.gate1.state_dict(),
+            'gate2': self.encoder_fusion.gate2.state_dict(),
+            'transformer_encoder': self.encoder_fusion.transformer_encoder.state_dict(),
             # 保存最终投影层
             'projection': self.encoder_fusion.projection.state_dict(),
         }, f"./{self.path_prefix}/encoder_{num}.pkl")
@@ -1166,9 +1168,11 @@ class FusionTrainer:
 
         # === 加载跨模态融合部分 ===
         try:
-            self.encoder_fusion.cross_attn.load_state_dict(state['cross_attn'], strict=False)
-            self.encoder_fusion.gate.load_state_dict(state['gate'], strict=False)
-            self.encoder_fusion.norm.load_state_dict(state['norm'], strict=False)
+            self.encoder_fusion.cross_attn1.load_state_dict(state['cross_attn1'], strict=False)
+            self.encoder_fusion.cross_attn2.load_state_dict(state['cross_attn2'], strict=False)
+            self.encoder_fusion.gate1.load_state_dict(state['gate1'], strict=False)
+            self.encoder_fusion.gate2.load_state_dict(state['gate2'], strict=False)
+            self.encoder_fusion.transformer_encoder.load_state_dict(state['transformer_encoder'], strict=False)
             if 'projection' in state:
                 self.encoder_fusion.projection.load_state_dict(state['projection'], strict=False)
         except Exception as e:
@@ -1192,7 +1196,7 @@ class FusionTrainer:
             print(f"[WARNING] Failed to load encoder body: {e}")
 
         # Load fusion modules
-        for part in ['cross_attn', 'gate', 'norm']:
+        for part in ['cross_attn1', 'cross_attn2', 'gate1', 'gate2', 'transformer_encoder']:
             try:
                 getattr(self.encoder_fusion, part).load_state_dict(state[part], strict=False)
             except Exception as e:
