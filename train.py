@@ -4,7 +4,7 @@ import os
 from utils.TrainPipline import TrainPipline
 import argparse
 
-def main(resume=True):
+def main(resume=False):
     """主函数"""
     # 设置随机种子
     torch.manual_seed(42)
@@ -13,7 +13,7 @@ def main(resume=True):
     # 数据路径
     data_path = r"D:\Jiaqi\Datasets\Rats\TrainData"
     save_path = r"./checkpoints"
-    session_name = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"]
+    session_name = ["F3D5_outdoor", "F3D6_outdoor"]
     if not os.path.exists(data_path):
         print(f"❌ 数据路径不存在: {data_path}")
         print("请检查数据路径是否正确")
@@ -27,7 +27,7 @@ def main(resume=True):
         N_feat_IMU=77,
         N_feat_DLC=66,
         num_classes=12,
-        spilit_num=5,
+        spilit_num=1,
         device='auto',
         max_samples_per_session=150000  # 限制每个session最多5万个样本，根据内存情况调整
     )
@@ -89,7 +89,7 @@ def main(resume=True):
 if __name__ == "__main__":
     success = main()
     parser = argparse.ArgumentParser()
-    parser.add_argument('--resume', default=True, help='resume training from last checkpoint')
+    parser.add_argument('--resume', default=False, help='resume training from last checkpoint')
     args = parser.parse_args()
     success = main(resume=args.resume)
 

@@ -429,7 +429,7 @@ class FusionTrainer:
                     train_data_sup_A, train_data_sup_B, labels_sup
                 )
             prototypes = self.stage2_prototypes
-            repulsion = prototype_repulsion_loss(prototypes)
+            # repulsion = prototype_repulsion_loss(prototypes)
             unsup_iter = iter(unsup_loader)
 
             for _ in tqdm.tqdm(range(len(unsup_loader)), desc=f'Stage3 Epoch {epoch+1}/{self.contrastive_epochs}'):
@@ -472,57 +472,59 @@ class FusionTrainer:
                         proto_sup = torch.tensor(0.0, device=self.device)
 
                     # ===== Unsupervised batch: FixMatch pseudo labelling =====
-                    weak_std = 0.05
-                    f_w = self.encoder_fusion(
-                        xA_u + torch.randn_like(xA_u) * weak_std,
-                        xB_u + torch.randn_like(xB_u) * weak_std,
-                        id_u,
-                    )
-                    f_su = self.encoder_fusion(
-                        self.strong_augment(xA_u),
-                        self.strong_augment(xB_u),
-                        id_u,
-                    )
+                    # weak_std = 0.05
+                    # f_w = self.encoder_fusion(
+                    #     xA_u + torch.randn_like(xA_u) * weak_std,
+                    #     xB_u + torch.randn_like(xB_u) * weak_std,
+                    #     id_u,
+                    # )
+                    # f_su = self.encoder_fusion(
+                    #     self.strong_augment(xA_u),
+                    #     self.strong_augment(xB_u),
+                    #     id_u,
+                    # )
 
-                    pooled_w = f_w.max(dim=1).values
-                    sims = torch.matmul(
-                        F.normalize(pooled_w, dim=-1),
-                        F.normalize(prototypes, dim=-1).T,
-                    )
+                    # pooled_w = f_w.max(dim=1).values
+                    # sims = torch.matmul(
+                    #     F.normalize(pooled_w, dim=-1),
+                    #     F.normalize(prototypes, dim=-1).T,
+                    # )
                     unsup_loss = compute_contrastive_losses(
                         self, xA_u, xB_u, None, None, id_u, is_supervised=False
                     )
-                    max_sims, pseudo = sims.max(dim=1)
-                    mask_h = max_sims > 0.95
-                    if mask_h.any():
-                        pseudo_onehot = F.one_hot(pseudo[mask_h], num_classes=self.num_classes).float()
-                        sup_pseudo = compute_contrastive_losses(
-                            self, None, None, pseudo_onehot, f_su[mask_h], id_u[mask_h], is_supervised=True, stage=3
-                        )
-                        logits_strong = torch.matmul(
-                            F.normalize(f_su[mask_h].max(dim=1).values, dim=-1),
-                            F.normalize(prototypes, dim=-1).T,
-                        )
-                        proto_unsup = F.cross_entropy(logits_strong, pseudo[mask_h])
-                        pseudo_feats_epoch.append(f_su[mask_h].max(dim=1).values.detach())
-                        pseudo_labels_epoch.append(pseudo[mask_h].detach())
-                    else:
-                        sup_pseudo = torch.tensor(0.0, device=self.device)
-                        proto_unsup = torch.tensor(0.0, device=self.device)
+                    # max_sims, pseudo = sims.max(dim=1)
+                    # mask_h = max_sims > 0.97
+                    # if mask_h.any():
+                    #     pseudo_onehot = F.one_hot(pseudo[mask_h], num_classes=self.num_classes).float()
+                    #     sup_pseudo = compute_contrastive_losses(
+                    #         self, None, None, pseudo_onehot, f_su[mask_h], id_u[mask_h], is_supervised=True, stage=3
+                    #     )
+                    #     logits_strong = torch.matmul(
+                    #         F.normalize(f_su[mask_h].max(dim=1).values, dim=-1),
+                    #         F.normalize(prototypes, dim=-1).T,
+                    #     )
+                    #     proto_unsup = F.cross_entropy(logits_strong, pseudo[mask_h])
+                    #     pseudo_feats_epoch.append(f_su[mask_h].max(dim=1).values.detach())
+                    #     pseudo_labels_epoch.append(pseudo[mask_h].detach())
+                    # else:
+                    #     sup_pseudo = torch.tensor(0.0, device=self.device)
+                    #     proto_unsup = torch.tensor(0.0, device=self.device)
 
-                    sup_total = sup_loss + sup_pseudo
-                    proto_loss = proto_sup + proto_unsup
+                    # sup_total = sup_loss + sup_pseudo
+                    # proto_loss = proto_sup + proto_unsup
+                    sup_total = sup_loss
 
-                    probs = F.softmax(sims, dim=1)
-                    avg_probs = probs.mean(dim=0)
-                    kl_loss = F.kl_div(torch.log(avg_probs + 1e-6), label_dist, reduction='batchmean')
+
+                    # probs = F.softmax(sims, dim=1)
+                    # avg_probs = probs.mean(dim=0)
+                    # kl_loss = F.kl_div(torch.log(avg_probs + 1e-6), label_dist, reduction='batchmean')
 
                 loss = (
-                    0.5 * sup_total
-                    + 0.5 * proto_loss
-                    + 0.5 * unsup_loss
-                    + self.proto_repulsion_weight * repulsion
-                    + self.kl_weight * kl_loss
+                    0.2 * sup_total
+                    # + 0.1 * proto_loss
+                    + 0.8 * unsup_loss
+                    # + 0.1* repulsion
+                    # + 0.1* kl_loss
                 )
 
                 self.optimizer_encoder.zero_grad()
@@ -536,10 +538,10 @@ class FusionTrainer:
 
 
                 epoch_losses['sup'] += sup_total.item()
-                epoch_losses['proto'] += proto_loss.item()
+                # epoch_losses['proto'] += proto_loss.item()
                 epoch_losses['unsup'] += unsup_loss.item()
-                epoch_losses['repul'] += repulsion.item()
-                epoch_losses['kl'] += kl_loss.item()
+                # epoch_losses['repul'] += repulsion.item()
+                # epoch_losses['kl'] += kl_loss.item()
                 epoch_losses['total'] += loss.item()
                 self.n_iters += 1
 
