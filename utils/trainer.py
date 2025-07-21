@@ -518,11 +518,8 @@ class FusionTrainer:
                     kl_loss = F.kl_div(torch.log(avg_probs + 1e-6), label_dist, reduction='batchmean')
 
                 loss = (
-                    0.5 * sup_total
-                    + 0.5 * proto_loss
+                    0.5 * sup_loss
                     + 0.5 * unsup_loss
-                    + self.proto_repulsion_weight * repulsion
-                    + self.kl_weight * kl_loss
                 )
 
                 self.optimizer_encoder.zero_grad()

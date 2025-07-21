@@ -222,7 +222,7 @@ if __name__ == "__main__":
     parser.add_argument("--train_sessions", nargs="+", default=["F3D5_outdoor"])
     parser.add_argument("--test_sessions", nargs="+", default=["F3D5_outdoor"])
     parser.add_argument("--model_dir", default="checkpoints_classifier", help="Where to save model")
-    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--epochs", type=int, default=30)
     args = parser.parse_args()

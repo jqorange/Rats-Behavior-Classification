@@ -28,5 +28,4 @@ class TemporalClassifier(nn.Module):
         x = self.trans(x)
         x = self.pool(x.transpose(1, 2)).squeeze(-1)
         x = self.fc(x)
-        x = torch.sigmoid(x)
         return x

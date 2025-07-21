@@ -105,8 +105,8 @@ def main(args):
             continue
         reps = np.load(rep_file)
 
-        # label_file = os.path.join(args.data_path, "labels", s, f"label_{s}.csv")
-        label_file = f"Predictions_results/{s}_modified.csv"
+        label_file = os.path.join(args.data_path, "labels", s, f"label_{s}.csv")
+        # label_file = f"Predictions_results/{s}_modified.csv"
         if os.path.exists(label_file):
             labels = pd.read_csv(label_file)[LABEL_COLUMNS].values
             min_len = min(len(labels), len(reps))
@@ -193,18 +193,18 @@ def main(args):
     )
     fig.show()
 
-    # if labels is not None:
-    #     metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])
-    #     print("\n=== Cluster Evaluation Metrics ===")
-    #     for k, v in metrics.items():
-    #         print(f"{k}: {v:.4f}")
+    if labels is not None:
+        metrics = compute_cluster_metrics(data_pca, labels, channel_names[:-1])
+        print("\n=== Cluster Evaluation Metrics ===")
+        for k, v in metrics.items():
+            print(f"{k}: {v:.4f}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Plot representations with evaluation")
     parser.add_argument("--data_path", default="D:\\Jiaqi\\Datasets\\Rats\\TrainData", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F5D2_outdoor","F5D10_outdoor"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor"], help="Session names")
     parser.add_argument("--rep_dir", default="representations", help="Representation directory")
-    parser.add_argument("--if_split", default=False, help="If true, only use last 20% of labeled data for evaluation")
+    parser.add_argument("--if_split", default=True, help="If true, only use last 20% of labeled data for evaluation")
     args = parser.parse_args()
     main(args)

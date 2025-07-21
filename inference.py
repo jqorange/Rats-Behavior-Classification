@@ -18,7 +18,7 @@ def latest_checkpoint(path):
         if m:
             num = int(m.group(1))
             # latest = max(latest, num)
-            latest = 782
+            latest = 780
     return latest
 
 
@@ -33,7 +33,7 @@ def main(args):
         N_feat_B=66,
         num_classes=12,
         device=device,
-        batch_size=512,
+        batch_size=256,
         d_model=64,
         nhead=4,
         num_sessions=5,
@@ -58,7 +58,7 @@ def main(args):
         imu = imu[:min_len].astype(np.float32)
         dlc = dlc[:min_len].astype(np.float32)
         if args.mode=="stage1":
-            reps = trainer.encode_state1(imu, dlc, 3, pool=True)
+            reps = trainer.encode_state1(imu, dlc, 4, pool=True)
         elif args.mode=="stage2":
             reps = trainer.encode(imu, dlc, mode="align", pool=True)
         out_file = os.path.join(args.output_dir, f"{session}_repr.npy")
@@ -69,7 +69,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate representations for sessions")
     parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor","F5D10_outdoor", "F6D5_outdoor_1"], help="Session names")
     parser.add_argument("--checkpoint_dir", default="checkpoints", help="Checkpoint directory")
     parser.add_argument("--output_dir", default="representations", help="Output directory")
     parser.add_argument("--mode", default="stage2", help="Output directory")
