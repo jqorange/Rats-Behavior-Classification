@@ -51,6 +51,21 @@ def load_session_data(rep_dir: str, label_dir: str, session: str, segments=None)
     return reps.astype(np.float32), labels.astype(np.float32)
 
 
+def load_unlabeled_data(rep_dir: str, session: str, segments=None):
+    rep_file = os.path.join(rep_dir, f"{session}_repr.npy")
+    reps = np.load(rep_file)
+    reps = create_context_windows(reps)
+    if segments:
+        labeled_idx = []
+        for s, e in segments:
+            labeled_idx.extend(list(range(s, e + 1)))
+        labeled_idx = [i for i in labeled_idx if i < len(reps)]
+        mask = np.ones(len(reps), dtype=bool)
+        mask[labeled_idx] = False
+        reps = reps[mask]
+    return reps.astype(np.float32)
+
+
 def evaluate_detailed(model, x, y, session_name, device):
     model.eval()
     dataset = TensorDataset(torch.from_numpy(x), torch.from_numpy(y))
@@ -75,6 +90,43 @@ def evaluate_detailed(model, x, y, session_name, device):
     #     print(f"Class {name:12s} | Acc: {acc[i]:.4f} | F1: {f1[i]:.4f}")
 
     return labels, pred_binary
+
+
+def pseudo_label(model, data, threshold, batch_size, device):
+    if len(data) == 0:
+        return (
+            np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32),
+            np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32),
+            data,
+        )
+    dataset = TensorDataset(torch.from_numpy(data))
+    loader = DataLoader(dataset, batch_size=batch_size)
+    keep_indices = []
+    preds = []
+    start = 0
+    model.eval()
+    with torch.no_grad():
+        for (xb,) in loader:
+            xb = xb.to(device)
+            prob = torch.sigmoid(model(xb)).cpu().numpy()
+            mask_high = prob >= threshold
+            keep = mask_high.any(axis=1)
+            if np.any(keep):
+                idx = np.nonzero(keep)[0] + start
+                keep_indices.extend(idx.tolist())
+                preds.append(mask_high[keep].astype(np.float32))
+            start += len(xb)
+    if keep_indices:
+        pseudo_x = data[keep_indices]
+        pseudo_y = np.concatenate(preds, axis=0)
+        remaining_mask = np.ones(len(data), dtype=bool)
+        remaining_mask[keep_indices] = False
+        remaining = data[remaining_mask]
+    else:
+        pseudo_x = np.empty((0, data.shape[1], data.shape[2]), dtype=np.float32)
+        pseudo_y = np.empty((0, len(LABEL_COLUMNS)), dtype=np.float32)
+        remaining = data
+    return pseudo_x, pseudo_y, remaining
 
 
 def mixup_data(x, y, alpha=1.0):
@@ -146,12 +198,32 @@ def train_simple_classifier(train_x, train_y, input_dim, num_classes, device, te
     return model
 
 
+def self_training(train_x, train_y, unlabeled_x, input_dim, num_classes, device, test_dict):
+    pseudo_x_total = np.empty((0, train_x.shape[1], input_dim), dtype=np.float32)
+    pseudo_y_total = np.empty((0, num_classes), dtype=np.float32)
+    model = None
+    for i in range(5):
+        print(f"\n=== Round {i+1}/5 ===")
+        combined_x = np.concatenate([train_x, pseudo_x_total], axis=0)
+        combined_y = np.concatenate([train_y, pseudo_y_total], axis=0)
+        model = train_simple_classifier(combined_x, combined_y, input_dim, num_classes, device, test_dict)
+        if len(unlabeled_x) == 0:
+            continue
+        new_x, new_y, unlabeled_x = pseudo_label(model, unlabeled_x, 0.95, 128, device)
+        print(f"  Pseudo labeled samples added: {len(new_x)}")
+        if len(new_x) > 0:
+            pseudo_x_total = np.concatenate([pseudo_x_total, new_x], axis=0)
+            pseudo_y_total = np.concatenate([pseudo_y_total, new_y], axis=0)
+    return model
+
+
 def main(args):
     segs = load_valid_segments(os.path.join(args.label_path, "results.txt"))
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # === 合并所有 session 的训练集 ===
     train_x_list, train_y_list = [], []
+    unlabeled_list = []
     test_dict = {}  # session -> (x, y)
 
     for session in args.sessions:
@@ -161,16 +233,23 @@ def main(args):
         train_y, test_y = y[:split], y[split:]
         train_x_list.append(train_x)
         train_y_list.append(train_y)
+        u = load_unlabeled_data(args.rep_dir, session, segs.get(session))
+        if len(u) > 0:
+            unlabeled_list.append(u)
         test_dict[session] = (test_x, test_y)
 
     # 合并训练数据
     train_x = np.concatenate(train_x_list, axis=0)
     train_y = np.concatenate(train_y_list, axis=0)
+    if unlabeled_list:
+        unlabeled_x = np.concatenate(unlabeled_list, axis=0)
+    else:
+        unlabeled_x = np.empty((0, train_x.shape[1], train_x.shape[2]), dtype=np.float32)
     input_dim = train_x.shape[2]
     num_classes = train_y.shape[1]
 
-    # === 训练一个模型 ===
-    model = train_simple_classifier(train_x, train_y, input_dim, num_classes, device, test_dict)
+    # === 训练并伪标签 ===
+    model = self_training(train_x, train_y, unlabeled_x, input_dim, num_classes, device, test_dict)
 
     # === 分 session 评估 + 汇总整体 ===
     all_true, all_pred = [], []
