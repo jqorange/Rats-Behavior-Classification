@@ -1,19 +1,20 @@
 import os
 import random
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple, Dict, Optional
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
 @dataclass
 class SessionData:
     """Container for per-session arrays."""
-    imu: np.ndarray
-    dlc: np.ndarray
+    imu: torch.Tensor
+    dlc: torch.Tensor
 
 
 class RatsWindowDataset(Dataset):
@@ -58,7 +59,8 @@ class RatsWindowDataset(Dataset):
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
 
         self.data: Dict[str, SessionData] = {}
-        self.samples: List[Tuple[str, int, np.ndarray]] = []
+        self.samples: List[Tuple[str, torch.Tensor]] = []
+        self.ranges: List[Dict[int, Tuple[int, int]]] = []
 
         for sid, session in enumerate(self.sessions):
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features.csv")
@@ -71,8 +73,8 @@ class RatsWindowDataset(Dataset):
 
             # ensure same length
             min_len = min(len(imu_df), len(dlc_df))
-            imu = imu_df.iloc[:min_len].to_numpy(dtype=np.float32)
-            dlc = dlc_df.iloc[:min_len].to_numpy(dtype=np.float32)
+            imu = torch.from_numpy(imu_df.iloc[:min_len].to_numpy(dtype=np.float32))
+            dlc = torch.from_numpy(dlc_df.iloc[:min_len].to_numpy(dtype=np.float32))
             self.data[session] = SessionData(imu=imu, dlc=dlc)
 
             label_df = label_df[label_df.drop(columns=["Index"]).any(axis=1)]
@@ -86,45 +88,52 @@ class RatsWindowDataset(Dataset):
             else:
                 idx_split = slice(n_train, None)
 
-            for idx, lab in zip(indices[idx_split], labels[idx_split]):
-                self.samples.append((session, idx, lab))
+            for centre, lab in zip(indices[idx_split], labels[idx_split]):
+                lab_tensor = torch.from_numpy(lab)
+                ranges: Dict[int, Tuple[int, int]] = {}
+                for T in self.window_sizes:
+                    half = T // 2
+                    if T % 2:
+                        start = centre - half
+                        end = centre + half + 1
+                    else:
+                        start = centre - half
+                        end = centre + half
+                    ranges[T] = (start, end)
+                self.samples.append((session, lab_tensor))
+                self.ranges.append(ranges)
 
-        self.num_labels = self.samples[0][2].shape[-1] if self.samples else 0
+        self.num_labels = self.samples[0][1].shape[-1] if self.samples else 0
 
     def __len__(self) -> int:  # pragma: no cover - simple
         return len(self.samples)
 
-    def _crop_with_pad(self, arr: np.ndarray, start: int, end: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _crop_with_pad(self, arr: torch.Tensor, start: int, end: int) -> Tuple[torch.Tensor, torch.Tensor]:
         T = end - start
-        feat = arr.shape[1]
-        out = np.zeros((T, feat), dtype=np.float32)
-        mask = np.zeros(T, dtype=bool)
         s = max(start, 0)
-        e = min(end, len(arr))
-        out_start = s - start
-        out_end = out_start + (e - s)
-        out[out_start:out_end] = arr[s:e]
-        mask[out_start:out_end] = True
+        e = min(end, arr.shape[0])
+        out = arr[s:e]
+        pad_left = s - start
+        pad_right = end - e
+        if pad_left or pad_right:
+            out = F.pad(out, (0, 0, pad_left, pad_right))
+        mask = torch.zeros(T, dtype=torch.bool)
+        mask[pad_left:pad_left + (e - s)] = True
         return out, mask
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | int | str]:  # pragma: no cover - I/O heavy
-        session, centre, label = self.samples[idx]
+        session, label = self.samples[idx]
+        ranges = self.ranges[idx]
         T = random.choice(self.window_sizes)
-        half = T // 2
-        if T % 2:
-            start = centre - half
-            end = centre + half + 1
-        else:
-            start = centre - half
-            end = centre + half
+        start, end = ranges[T]
         data = self.data[session]
         imu, mask = self._crop_with_pad(data.imu, start, end)
         dlc, _ = self._crop_with_pad(data.dlc, start, end)
         return {
-            "imu": torch.from_numpy(imu),
-            "dlc": torch.from_numpy(dlc),
-            "mask": torch.from_numpy(mask),
-            "label": torch.from_numpy(label),
+            "imu": imu,
+            "dlc": dlc,
+            "mask": mask,
+            "label": label,
             "session": session,
             "session_idx": self.session_to_idx[session],
         }
