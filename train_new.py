@@ -21,6 +21,7 @@ from models.losses import (
     positive_only_supcon_loss,
 )
 import torch.nn.functional as F
+from utils.checkpoint import save_checkpoint, load_checkpoint
 
 
 class ThreeStageTrainer:
@@ -37,7 +38,10 @@ class ThreeStageTrainer:
             # drop_prob=0.1,
         ).to(self.device)
         self.proj = torch.nn.Linear(64, 64).to(self.device)
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(
+            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
+        )
+        self.total_epochs = 0
 
         # ✅ 新 API
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
@@ -139,8 +143,22 @@ class ThreeStageTrainer:
             self.scaler.step(self.opt)
             self.scaler.update()
 
+    def load_from(self, path: str, expected_stage: int) -> int:
+        """加载 checkpoint 并返回其中记录的阶段。"""
+        self.total_epochs, stage = load_checkpoint(
+            self.model, self.proj, self.opt, path, expected_stage=expected_stage
+        )
+        return stage
+
     def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
         """无监督学习：每个 batch 内不混 session（by_session），每组统一 T。"""
+        for p in self.model.parameters():
+            p.requires_grad = True
+        for p in self.proj.parameters():
+            p.requires_grad = True
+        self.opt = torch.optim.Adam(
+            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
+        )
         for ep in range(epochs):
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset",
@@ -151,13 +169,24 @@ class ThreeStageTrainer:
             )
             it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
             self._run_epoch(it, self._step_unsup)
+            self.total_epochs += 1
+            if self.total_epochs % 5 == 0:
+                save_checkpoint(
+                    self.model,
+                    self.proj,
+                    self.opt,
+                    total_epochs=self.total_epochs,
+                    stage=1,
+                    path=os.path.join("checkpoints", f"stage1_epoch{self.total_epochs}.pt"),
+                )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
         """冻结编码器：先无监督（不混 session），再有监督（混 session）。"""
-        for p in self.model.encoderA.parameters():
+        for p in self.model.parameters():
             p.requires_grad = False
-        for p in self.model.encoderB.parameters():
-            p.requires_grad = False
+        for p in self.proj.parameters():
+            p.requires_grad = True
+        self.opt = torch.optim.Adam(self.proj.parameters(), lr=1e-3)
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -172,11 +201,26 @@ class ThreeStageTrainer:
 
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
             self._run_epoch(it_sup, self._step_sup_stage2)
+            self.total_epochs += 1
+            if self.total_epochs % 5 == 0:
+                save_checkpoint(
+                    self.model,
+                    self.proj,
+                    self.opt,
+                    total_epochs=self.total_epochs,
+                    stage=2,
+                    path=os.path.join("checkpoints", f"stage2_epoch{self.total_epochs}.pt"),
+                )
 
     def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
         """联训：有监督 + 无监督都在混 session 的 batch 上进行。"""
         for p in self.model.parameters():
             p.requires_grad = True
+        for p in self.proj.parameters():
+            p.requires_grad = True
+        self.opt = torch.optim.Adam(
+            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
+        )
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -192,6 +236,16 @@ class ThreeStageTrainer:
             def step_joint(b):
                 return self._step_sup(b) + self._step_unsup(b)
             self._run_epoch(it, step_joint)
+            self.total_epochs += 1
+            if self.total_epochs % 5 == 0:
+                save_checkpoint(
+                    self.model,
+                    self.proj,
+                    self.opt,
+                    total_epochs=self.total_epochs,
+                    stage=3,
+                    path=os.path.join("checkpoints", f"stage3_epoch{self.total_epochs}.pt"),
+                )
 
 
 def main() -> None:
