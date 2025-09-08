@@ -45,7 +45,8 @@ class ThreeStageTrainer:
     def _step_unsup(self, batch: dict) -> torch.Tensor:
         imu = batch["imu"].to(self.device)
         dlc = batch["dlc"].to(self.device)
-        emb, _, _ = self.model(imu, dlc, session_idx=None)
+        session_idx = batch["session_idx"].to(self.device)
+        emb, _, _ = self.model(imu, dlc, session_idx=session_idx)
         loss = hierarchical_contrastive_loss(emb, emb)
         return loss
 
@@ -53,7 +54,8 @@ class ThreeStageTrainer:
         imu = batch["imu"].to(self.device)
         dlc = batch["dlc"].to(self.device)
         labels = batch["label"].to(self.device)
-        emb, _, _ = self.model(imu, dlc, session_idx=None)
+        session_idx = batch["session_idx"].to(self.device)
+        emb, _, _ = self.model(imu, dlc, session_idx=session_idx)
         loss = multilabel_supcon_loss_bt(emb, labels)
         return loss
 
