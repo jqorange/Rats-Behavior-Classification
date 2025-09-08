@@ -20,7 +20,7 @@ from models.losses import (
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
 )
-
+from tqdm import tqdm
 
 class ThreeStageTrainer:
     """Minimal trainer implementing the three-stage schedule.
@@ -29,7 +29,7 @@ class ThreeStageTrainer:
     Only a subset of the losses is implemented for brevity.
     """
 
-    def __init__(self, num_features_imu: int, num_features_dlc: int, num_classes: int, device: str = "cpu") -> None:
+    def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions:int, device: str = "cpu") -> None:
         self.device = device
         self.model = EncoderFusion(
             N_feat_A=num_features_imu,
@@ -37,7 +37,7 @@ class ThreeStageTrainer:
             mask_type="binomial",
             d_model=64,
             nhead=4,
-            num_sessions=0,
+            num_sessions=num_sessions,
         ).to(device)
         self.proj = torch.nn.Linear(64, 64).to(device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
@@ -45,7 +45,7 @@ class ThreeStageTrainer:
     def _step_unsup(self, batch: dict) -> torch.Tensor:
         imu = batch["imu"].to(self.device)
         dlc = batch["dlc"].to(self.device)
-        session_idx = batch["session_idx"].to(self.device)
+        session_idx = batch["session_idx"].to(self.device, dtype=torch.long)
         emb, _, _ = self.model(imu, dlc, session_idx=session_idx)
         loss = hierarchical_contrastive_loss(emb, emb)
         return loss
@@ -64,7 +64,7 @@ class ThreeStageTrainer:
 
         self.model.train()
         for _ in range(epochs):
-            for batch in loader:
+            for batch in tqdm(loader):
                 self.opt.zero_grad()
                 loss = self._step_unsup(batch)
                 loss.backward()
@@ -132,13 +132,13 @@ def build_loaders(
 
 
 def main() -> None:  # pragma: no cover - entry point
-    data_root = os.environ.get("RATS_DATA_ROOT", "./data")
-    sessions = ["session1"]
-    session_loader, mixed_loader, _ = build_loaders(data_root, sessions)
+    data_root = "D:\Jiaqi\Datasets\Rats\TrainData_new"
+    sessions = ["F3D5_outdoor", "F3D6_outdoor"]
+    session_loader, mixed_loader, _ = build_loaders(data_root, sessions,batch_size=256)
     num_feat_imu = mixed_loader.dataset.data[sessions[0]].imu.shape[1]
     num_feat_dlc = mixed_loader.dataset.data[sessions[0]].dlc.shape[1]
-    num_classes = mixed_loader.dataset.num_labels
-    trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc, num_classes)
+    num_sessions = len(sessions)
+    trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc,num_sessions)
     trainer.stage1(session_loader, epochs=1)
     trainer.stage2(session_loader, mixed_loader, epochs=1)
     trainer.stage3(mixed_loader, epochs=1)
