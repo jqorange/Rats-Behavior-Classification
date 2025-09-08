@@ -68,7 +68,8 @@ class ThreeStageTrainer:
 
     def _run_epoch(self, iterator, step_fn):
         self.model.train()
-        for batch in iterator:
+        batches = list(iterator)  # 先收集
+        for batch in tqdm(batches, total=len(batches)):
             self.opt.zero_grad(set_to_none=True)
             loss = step_fn(batch)
             self.scaler.scale(loss).backward()
@@ -119,6 +120,7 @@ class ThreeStageTrainer:
                 dataset, batch_size, out_dir="Dataset",
                 group_mode="by_session",
                 assign_T="round_robin",
+                device="cuda",
                 num_workers=n_workers_preproc,
                 seed=5678 + ep,
             )
@@ -132,22 +134,31 @@ class ThreeStageTrainer:
 def main() -> None:
     data_root = r"D:\Jiaqi\Datasets\Rats\TrainData_new"
     sessions = ["F3D5_outdoor", "F3D6_outdoor"]
-    batch_size = 1024
+    batch_size = 512
     session_ranges = None
 
+    # 载入 dataset：只负责加载原始序列 + label index，不再裁剪
     train_ds = RatsWindowDataset(
         data_root, sessions, split="train", session_ranges=session_ranges
     )
+
+    # 特征维度：从原始数据里取
     num_feat_imu = train_ds.data[sessions[0]].imu.shape[1]
     num_feat_dlc = train_ds.data[sessions[0]].dlc.shape[1]
     num_sessions = len(sessions)
 
     trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc, num_sessions)
-    # 预处理多线程数：根据机器情况调整；HDF5 写入依旧串行，线程只做裁剪与拼 batch
-    n_workers_preproc = 29
 
-    trainer.stage1(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc)
+    # 预处理多线程数：HDF5 写还是串行，线程只做裁剪与拼 batch
+    n_workers_preproc = 1
+
+    print(">>> Stage 1 (unsupervised)...")
+    trainer.stage1(train_ds, batch_size, epochs=10, n_workers_preproc=n_workers_preproc)
+
+    print(">>> Stage 2 (frozen encoder: unsup + sup)...")
     trainer.stage2(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc)
+
+    print(">>> Stage 3 (joint training)...")
     trainer.stage3(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc)
 
 

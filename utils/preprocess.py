@@ -1,9 +1,8 @@
 # utils/preprocess.py
 import os
-import math
 import random
-from typing import Sequence, Dict, List, Tuple, Optional
-from collections import defaultdict
+from typing import Sequence, Dict, List, Optional, Tuple
+from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -19,82 +18,200 @@ def _split_into_groups(indices: List[int], group_size: int) -> List[List[int]]:
     return [indices[i*group_size:(i+1)*group_size] for i in range(n_full)]
 
 
-def _ensure_len_group(f: h5py.File, T: int,
-                      feat_imu: int, feat_dlc: int, n_labels: int,
-                      batch_size: int):
-    """确保 len_T 组和其中的数据集存在（resizable），否则创建。"""
-    grp_name = f"len_{T}"
-    grp = f.require_group(grp_name)
+@torch.no_grad()
+def _mad_from_rows(
+    x: torch.Tensor,
+    *,
+    eps: float = 1e-8,
+    scale_to_std: bool = True,
+    sample_rows: Optional[int] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    计算每列 median & MAD（可抽样加速）
+    x: (L, F)
+    return: (median(F,), mad_scaled(F,))
+    """
+    x = torch.nan_to_num(x.float())
+    L = x.shape[0]
+    if sample_rows is not None and L > sample_rows:
+        # 随机抽样到 sample_rows 行（在 device 上完成，不额外复制）
+        idx = torch.randint(0, L, (sample_rows,), device=x.device)
+        x_s = x.index_select(0, idx)
+    else:
+        x_s = x
 
-    def _mk(name, shape_tail, dtype, compression=None):
-        if name not in grp:
-            # 形状：(num_batches, batch_size, ...)
-            shape = (0, batch_size, *shape_tail)
-            maxshape = (None, batch_size, *shape_tail)
-            kwargs = dict(chunks=True)
-            # 如需更小体积可开启压缩：compression="gzip", compression_opts=4
-            if compression is not None:
-                kwargs.update(dict(compression=compression, compression_opts=4))
-            grp.create_dataset(name, shape=shape, maxshape=maxshape, dtype=dtype, **kwargs)
-        return grp[name]
-
-    # 不对特征做压缩；mask/label 压缩收益较大，但这里保持简单一致
-    _mk("imu",   (T, feat_imu), np.float32)
-    _mk("dlc",   (T, feat_dlc), np.float32)
-    _mk("mask",  (T,),          np.bool_)
-    _mk("label", (n_labels,),   np.float32)
-
-    if "num_batches" not in grp.attrs:
-        grp.attrs["num_batches"] = 0
-
-    return grp
-
-
-def _append_batch(grp: h5py.Group,
-                  imu: np.ndarray, dlc: np.ndarray,
-                  mask: np.ndarray, label: np.ndarray):
-    """在 len_T 组里追加一个 batch。"""
-    n = grp["imu"].shape[0]
-    new_n = n + 1
-    grp["imu"].resize((new_n, ) + grp["imu"].shape[1:])
-    grp["dlc"].resize((new_n, ) + grp["dlc"].shape[1:])
-    grp["mask"].resize((new_n, ) + grp["mask"].shape[1:])
-    grp["label"].resize((new_n, ) + grp["label"].shape[1:])
-
-    grp["imu"][n, ...]   = imu
-    grp["dlc"][n, ...]   = dlc
-    grp["mask"][n, ...]  = mask
-    grp["label"][n, ...] = label
-    grp.attrs["num_batches"] = int(new_n)
+    med = x_s.median(dim=0).values                     # (F,)
+    mad = (x_s - med).abs().median(dim=0).values       # (F,)
+    if scale_to_std:
+        mad = mad * 1.4826
+    mad = torch.clamp(mad, min=eps)
+    return med, mad
 
 
-def _process_one_group(dataset, session, idx_group, T):
-    data = dataset.data[session]
-    imu_list, dlc_list, mask_list, label_list = [], [], [], []
+@torch.no_grad()
+def _apply_mad_norm(x: torch.Tensor, med: torch.Tensor, mad: torch.Tensor) -> torch.Tensor:
+    """按列 MAD 归一化： (x - med) / mad"""
+    return torch.nan_to_num((x.float() - med) / mad)
 
-    for idx in idx_group:
-        start, end = dataset.ranges[idx][T]
-        imu_t, mask_t = dataset._crop_with_pad(data.imu, start, end)
-        dlc_t, _      = dataset._crop_with_pad(data.dlc, start, end)
-        _, label = dataset.samples[idx]
 
-        imu_np = imu_t.numpy().astype(np.float32)
-        dlc_np = dlc_t.numpy().astype(np.float32)
+@torch.no_grad()
+def _batch_crop_rows(data_rows: torch.Tensor, starts: torch.Tensor, T: int):
+    """
+    向量化裁剪（无逐样本 for-loop）
+      data_rows: (L, F)
+      starts: (B,)
+    return:
+      windows: (B, T, F), mask: (B, T)
+    """
+    device = data_rows.device
+    L, F = data_rows.shape
+    B = starts.numel()
+    ar = torch.arange(T, device=device)                 # (T,)
+    idx = starts.view(-1, 1) + ar.view(1, -1)          # (B, T)
+    mask = (idx >= 0) & (idx < L)
+    idx = idx.clamp(0, L - 1)
+    rows = torch.index_select(data_rows, 0, idx.view(-1))
+    windows = rows.view(B, T, F) * mask.unsqueeze(-1)
+    return windows, mask
 
-        # ✅ 清理非有限值，避免后续 adapter/LN 炸掉
-        imu_np = np.nan_to_num(imu_np, nan=0.0, posinf=0.0, neginf=0.0)
-        dlc_np = np.nan_to_num(dlc_np, nan=0.0, posinf=0.0, neginf=0.0)
 
-        imu_list.append(imu_np)
-        dlc_list.append(dlc_np)
-        mask_list.append(mask_t.numpy().astype(bool))
-        label_list.append(label.numpy().astype(np.float32))
+def _save_scaler(cache_path: str, med_imu: torch.Tensor, mad_imu: torch.Tensor,
+                 med_dlc: torch.Tensor, mad_dlc: torch.Tensor):
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    np.savez(
+        cache_path,
+        med_imu=med_imu.detach().cpu().numpy(),
+        mad_imu=mad_imu.detach().cpu().numpy(),
+        med_dlc=med_dlc.detach().cpu().numpy(),
+        mad_dlc=mad_dlc.detach().cpu().numpy(),
+        version=1,
+    )
 
-    imu = np.stack(imu_list, axis=0)
-    dlc = np.stack(dlc_list, axis=0)
-    mask = np.stack(mask_list, axis=0)
-    label = np.stack(label_list, axis=0)
-    return T, imu, dlc, mask, label
+
+def _load_scaler(cache_path: str, device: str) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    if not os.path.exists(cache_path):
+        return None
+    arr = np.load(cache_path)
+    med_imu = torch.from_numpy(arr["med_imu"]).to(device)
+    mad_imu = torch.from_numpy(arr["mad_imu"]).to(device)
+    med_dlc = torch.from_numpy(arr["med_dlc"]).to(device)
+    mad_dlc = torch.from_numpy(arr["mad_dlc"]).to(device)
+    return med_imu, mad_imu, med_dlc, mad_dlc
+
+
+def _np_dtype_from_str(name: str):
+    name = name.lower()
+    if name in ("float32", "fp32"):
+        return np.float32
+    if name in ("float16", "fp16", "half"):
+        return np.float16
+    if name in ("uint8", "u8", "byte"):
+        return np.uint8
+    if name in ("bool", "boolean"):
+        return np.bool_
+    raise ValueError(f"Unsupported dtype: {name}")
+
+
+def _build_session_file(
+    session: str,
+    groups: List[List[int]],
+    Ts: List[int],
+    dataset: RatsWindowDataset,
+    out_dir: str,
+    device: str,
+    compress: bool,
+    mad_scale_to_std: bool,
+    mad_cache_dir: str,
+    use_mad_cache: bool,
+    mad_sample_rows: Optional[int],
+    store_dtype: str,
+    label_dtype: str,
+    mask_dtype: str,
+    preproc_shard_batches: int,
+):
+    """单个 session：MAD 归一化（可缓存/抽样）+ 分块向量化裁剪 + 分块写 HDF5。"""
+    if not groups:
+        return
+
+    feat_imu = int(dataset.data[session].imu.shape[1])
+    feat_dlc = int(dataset.data[session].dlc.shape[1])
+    n_labels = int(dataset.samples[0][1].numel())
+    batch_size = len(groups[0])
+
+    # ---- 预创建 HDF5 dset（按 T 预分配） ----
+    count_T = Counter(Ts)
+    path = os.path.join(out_dir, f"{session}.h5")
+    with h5py.File(path, "w") as f:
+        kwargs = dict(chunks=True)
+        if compress:
+            kwargs.update(dict(compression="gzip", compression_opts=4))
+
+        dsets = {}
+        for T, n_batches in count_T.items():
+            grp = f.create_group(f"len_{T}")
+            dsets[T] = {
+                "imu":   grp.create_dataset("imu",   shape=(n_batches, batch_size, T, feat_imu), dtype=_np_dtype_from_str(store_dtype), **kwargs),
+                "dlc":   grp.create_dataset("dlc",   shape=(n_batches, batch_size, T, feat_dlc), dtype=_np_dtype_from_str(store_dtype), **kwargs),
+                "mask":  grp.create_dataset("mask",  shape=(n_batches, batch_size, T),          dtype=_np_dtype_from_str(mask_dtype),  **kwargs),
+                "label": grp.create_dataset("label", shape=(n_batches, batch_size, n_labels),    dtype=_np_dtype_from_str(label_dtype), **kwargs),
+            }
+            grp.attrs["num_batches"] = n_batches
+
+        # ---- 准备序列并做 MAD 归一化（优先用缓存）----
+        imu_rows = dataset.data[session].imu.to(device)
+        dlc_rows = dataset.data[session].dlc.to(device)
+
+        cache_path = os.path.join(mad_cache_dir, f"{session}_mad.npz")
+        scalers = _load_scaler(cache_path, device) if use_mad_cache else None
+        if scalers is None:
+            med_imu, mad_imu = _mad_from_rows(imu_rows, scale_to_std=mad_scale_to_std, sample_rows=mad_sample_rows)
+            med_dlc, mad_dlc = _mad_from_rows(dlc_rows, scale_to_std=mad_scale_to_std, sample_rows=mad_sample_rows)
+            if use_mad_cache:
+                _save_scaler(cache_path, med_imu, mad_imu, med_dlc, mad_dlc)
+        else:
+            med_imu, mad_imu, med_dlc, mad_dlc = scalers
+
+        imu_rows = _apply_mad_norm(imu_rows, med_imu, mad_imu)
+        dlc_rows = _apply_mad_norm(dlc_rows, med_dlc, mad_dlc)
+
+        # ---- 按 T 分块裁剪写入，避免一次性占满内存 ----
+        for T in count_T.keys():
+            grp_indices = [grp for grp, t_ in zip(groups, Ts) if t_ == T]
+            if not grp_indices:
+                continue
+            n_batches = len(grp_indices)
+
+            # shard 规模：一次处理这么多个 batch
+            shard = max(1, min(preproc_shard_batches, n_batches))
+            write_ptr = 0
+            while write_ptr < n_batches:
+                j0 = write_ptr
+                j1 = min(n_batches, write_ptr + shard)
+                cur_groups = grp_indices[j0:j1]  # 切一小段
+                B_total = len(cur_groups) * batch_size
+
+                flat_indices = [i for g in cur_groups for i in g]
+                flat_centres = [dataset.samples[i][2] for i in flat_indices]  # 每个样本的中心点
+                starts = torch.tensor([c - (T // 2) for c in flat_centres], device=device, dtype=torch.long)
+                labels = torch.stack([dataset.samples[i][1] for i in flat_indices], dim=0).to(device).float()
+
+                imu_win, mask = _batch_crop_rows(imu_rows, starts, T)
+                dlc_win, _    = _batch_crop_rows(dlc_rows, starts, T)
+
+                # reshape 成 (num_shard_batches, batch_size, T, F)
+                cur_nb = len(cur_groups)
+                imu_win = imu_win.view(cur_nb, batch_size, T, feat_imu)
+                dlc_win = dlc_win.view(cur_nb, batch_size, T, feat_dlc)
+                mask    = mask.view(cur_nb, batch_size, T)
+                labels  = labels.view(cur_nb, batch_size, n_labels)
+
+                # 写盘（降精度/类型转换）
+                dsets[T]["imu"][j0:j1, :, :, :]   = imu_win.detach().cpu().to(torch.float16 if store_dtype=="float16" else torch.float32).numpy()
+                dsets[T]["dlc"][j0:j1, :, :, :]   = dlc_win.detach().cpu().to(torch.float16 if store_dtype=="float16" else torch.float32).numpy()
+                dsets[T]["mask"][j0:j1, :, :]     = mask.detach().cpu().to(torch.uint8 if mask_dtype=="uint8" else torch.bool).numpy()
+                dsets[T]["label"][j0:j1, :, :]    = labels.detach().cpu().to(torch.uint8 if label_dtype=="uint8" else torch.float32).numpy()
+
+                write_ptr = j1
 
 
 def preprocess_dataset(
@@ -102,111 +219,115 @@ def preprocess_dataset(
     batch_size: int,
     out_dir: str = "Dataset",
     *,
-    group_mode: str = "by_session",         # "by_session" 或 "global"（建议 by_session）
-    assign_T: str = "round_robin",          # "round_robin" 或 "random"
-    num_workers: int = 0,                   # >0 启用多线程
-    seed: int = 42
+    group_mode: str = "by_session",     # "by_session" / "global"
+    assign_T: str = "round_robin",      # "round_robin" / "random"
+    seed: int = 42,
+    device: str | None = None,          # "cuda" / "cpu"
+    compress: bool = False,
+    num_workers: int = 0,               # 按 session 并行
+    mad_scale_to_std: bool = True,
+    mad_cache_dir: str = "Dataset/scalers",
+    use_mad_cache: bool = True,
+    mad_sample_rows: Optional[int] = 200_000,   # None=全量精确；数值越小越快
+    store_dtype: str = "float16",              # "float16" / "float32"
+    label_dtype: str = "uint8",                # "uint8" / "float32"
+    mask_dtype: str = "uint8",    # "uint8" / "bool"
+    window_sizes: Sequence[int] = (16, 32, 64, 128, 256, 512),  # <== 新增
+    preproc_shard_batches: int = 8,            # 每次处理/写入的 batch 数
 ) -> None:
     """
-    预处理：先按 index 分组，每组统一窗口长度 T，再统一裁剪；支持多线程加速。
-
-    参数
-    ----
-    dataset : RatsWindowDataset
-    batch_size : int
-        每个 batch 的样本数，不满的丢弃。
-    out_dir : str
-        输出目录，写 <session>.h5（按会话分文件，方便后续 mix 控制）。
-    group_mode : {"by_session", "global"}
-        - "by_session": 每个 session 内部各自分组与裁剪（推荐；与原先逻辑一致）。
-        - "global":     跨 session 把所有 index 混在一起分组，再按各组 session 写回各自文件。
-    assign_T : {"round_robin", "random"}
-        为每个组分配窗口长度 T 的策略。round_robin 能保证各 T 大致均衡。
-    num_workers : int
-        线程数。>0 时用 ThreadPoolExecutor 并行裁剪；HDF5 写仍在主线程串行进行。
-    seed : int
-        随机种子，保证每个 epoch 可复现（若希望每个 epoch 随机性不同，可传入 epoch 变化的 seed）。
+    MAD 归一化（支持缓存/抽样） + 分块向量化裁剪写入（低峰值内存） + 按 session 并行
     """
     os.makedirs(out_dir, exist_ok=True)
     rng = random.Random(seed)
-    window_sizes = list(dataset.window_sizes)
 
-    # 收集每个 session 对应的样本索引
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # GPU 下避免多线程争用同一块卡
+    if str(device).startswith("cuda") and num_workers and num_workers > 1:
+        num_workers = 1
+
+    # 收集每个 session 的样本索引
     session_to_indices: Dict[str, List[int]] = defaultdict(list)
-    for idx, (sess, _) in enumerate(dataset.samples):
+    for idx, (sess, _, _) in enumerate(dataset.samples):
         session_to_indices[sess].append(idx)
 
-    # 如果是 global，就把所有 index 打散，再按所属 session 回写
+    # 组装 batch（不跨 session）
+    groups_per_session: Dict[str, List[List[int]]] = {}
     if group_mode == "global":
-        all_indices = [(sess, idx) for sess, lst in session_to_indices.items() for idx in lst]
-        rng.shuffle(all_indices)
-        groups_per_session: Dict[str, List[List[int]]] = defaultdict(list)
-        # 直接把 (sess, idx) 流按 batch_size 切，但必须保证同组都属于同一个 session
-        # 为了简单稳妥：按 session 维持队列，再轮询抽取满 batch
-        per_sess_queues = {s: lst[:] for s, lst in session_to_indices.items()}
+        per_sess_queues = {s: session_to_indices[s][:] for s in session_to_indices}
         for s in per_sess_queues:
             rng.shuffle(per_sess_queues[s])
-
-        # 轮询拼 batch：尽最大努力均衡，不强行跨 session
+        tmp = defaultdict(list)
         made_any = True
         while made_any:
             made_any = False
-            for s in list(per_sess_queues.keys()):
-                q = per_sess_queues[s]
+            for s, q in per_sess_queues.items():
                 if len(q) >= batch_size:
-                    groups_per_session[s].append([q.pop() for _ in range(batch_size)])
+                    tmp[s].append([q.pop() for _ in range(batch_size)])
                     made_any = True
-
+        groups_per_session = dict(tmp)
     else:
-        # by_session：每个 session 自己打乱并分组
-        groups_per_session = {}
         for s, idxs in session_to_indices.items():
             rng.shuffle(idxs)
             groups_per_session[s] = _split_into_groups(idxs, batch_size)
 
-    # 预先拿到维度信息（用第一个 session 读取）
-    first_sess = next(iter(dataset.data.keys()))
-    feat_imu = int(dataset.data[first_sess].imu.shape[1])
-    feat_dlc = int(dataset.data[first_sess].dlc.shape[1])
-    # label 维度
-    sample_label = dataset.samples[0][1]
-    n_labels = int(sample_label.numel())
-
-    # 每个 session 单独写一个 H5 文件；为了避免 HDF5 并发写问题，写入串行进行。
-    for session, groups in groups_per_session.items():
-        if not groups:
-            continue
-        # 给每个组分配 T
+    # 为每个 session 分配每组的 T
+    Ts_per_session: Dict[str, List[int]] = {}
+    for s, groups in groups_per_session.items():
         if assign_T == "round_robin":
-            Ts = [window_sizes[i % len(window_sizes)] for i in range(len(groups))]
-        else:  # random
-            Ts = [rng.choice(window_sizes) for _ in range(len(groups))]
+            Ts_per_session[s] = [window_sizes[i % len(window_sizes)] for i in range(len(groups))]
+        else:
+            Ts_per_session[s] = [rng.choice(window_sizes) for _ in range(len(groups))]
 
-        path = os.path.join(out_dir, f"{session}.h5")
-        # 覆盖写（每个 epoch 重新生成）
-        with h5py.File(path, "w") as f:
-            # 先准备所有 len_T 组
-            prepared_T = set()
-            for T in set(Ts):
-                _ensure_len_group(f, T, feat_imu, feat_dlc, n_labels, batch_size)
-                prepared_T.add(T)
-
-            # 并行裁剪→主线程逐个写入
-            if num_workers and num_workers > 0:
-                with ThreadPoolExecutor(max_workers=num_workers) as ex:
-                    futures = []
-                    for idx_group, T in zip(groups, Ts):
-                        futures.append(ex.submit(_process_one_group, dataset, session, idx_group, T))
-                    for fut in as_completed(futures):
-                        T, imu, dlc, mask, label = fut.result()
-                        grp = f[f"len_{T}"]
-                        _append_batch(grp, imu, dlc, mask, label)
-            else:
-                # 单线程
-                for idx_group, T in zip(groups, Ts):
-                    T, imu, dlc, mask, label = _process_one_group(dataset, session, idx_group, T)
-                    grp = f[f"len_{T}"]
-                    _append_batch(grp, imu, dlc, mask, label)
+    # 并行/串行执行
+    sessions = list(groups_per_session.keys())
+    if num_workers and num_workers > 1:
+        with ThreadPoolExecutor(max_workers=num_workers) as ex:
+            futures = []
+            for s in sessions:
+                futures.append(
+                    ex.submit(
+                        _build_session_file,
+                        s,
+                        groups_per_session[s],
+                        Ts_per_session[s],
+                        dataset,
+                        out_dir,
+                        device,
+                        compress,
+                        mad_scale_to_std,
+                        mad_cache_dir,
+                        use_mad_cache,
+                        mad_sample_rows,
+                        store_dtype,
+                        label_dtype,
+                        mask_dtype,
+                        preproc_shard_batches,
+                    )
+                )
+            for _ in as_completed(futures):
+                pass
+    else:
+        for s in sessions:
+            _build_session_file(
+                s,
+                groups_per_session[s],
+                Ts_per_session[s],
+                dataset,
+                out_dir,
+                device,
+                compress,
+                mad_scale_to_std,
+                mad_cache_dir,
+                use_mad_cache,
+                mad_sample_rows,
+                store_dtype,
+                label_dtype,
+                mask_dtype,
+                preproc_shard_batches,
+            )
 
 
 def load_preprocessed_batches(
@@ -217,9 +338,7 @@ def load_preprocessed_batches(
 ):
     """
     从预处理好的 HDF5 依次产出 batch。
-
-    mix=False: 逐 session 顺序产出；
-    mix=True: 先把所有 (session, batch) 收集后打乱。
+    读取时把半精度/uint8 转回训练常用 dtype。
     """
     batches = []
     for session in sessions:
@@ -228,31 +347,22 @@ def load_preprocessed_batches(
             continue
         with h5py.File(path, "r") as f:
             for grp in f.values():
-                imu = np.asarray(grp["imu"], dtype=np.float32)     # (num_batches, B, T, F_imu)
-                dlc = np.asarray(grp["dlc"], dtype=np.float32)     # (num_batches, B, T, F_dlc)
-                mask = np.asarray(grp["mask"], dtype=bool)          # (num_batches, B, T)
-                label = np.asarray(grp["label"], dtype=np.float32)  # (num_batches, B, C)
+                imu = np.asarray(grp["imu"], dtype=np.float16)     # 存的是 fp16
+                dlc = np.asarray(grp["dlc"], dtype=np.float16)
+                mask = np.asarray(grp["mask"])                     # uint8/bool
+                label = np.asarray(grp["label"])                   # uint8/float32
                 num_batches = imu.shape[0]
                 for i in range(num_batches):
-                    batches.append(
-                        (
-                            session,
-                            imu[i],
-                            dlc[i],
-                            mask[i],
-                            label[i],
-                        )
-                    )
+                    batches.append((session, imu[i], dlc[i], mask[i], label[i]))
     if mix:
         random.shuffle(batches)
     for session, imu, dlc, mask, label in batches:
+        # 训练时统一转回 float32 & bool
         yield {
-            "imu": torch.from_numpy(imu),
-            "dlc": torch.from_numpy(dlc),
-            "mask": torch.from_numpy(mask),
-            "label": torch.from_numpy(label),
+            "imu": torch.from_numpy(imu.astype(np.float32)),
+            "dlc": torch.from_numpy(dlc.astype(np.float32)),
+            "mask": torch.from_numpy(mask.astype(bool)),
+            "label": torch.from_numpy(label.astype(np.float32)),
             "session": session,
-            "session_idx": torch.full(
-                (imu.shape[0],), session_to_idx[session], dtype=torch.long
-            ),
+            "session_idx": torch.full((imu.shape[0],), session_to_idx[session], dtype=torch.long),
         }

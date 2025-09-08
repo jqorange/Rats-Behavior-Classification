@@ -6,43 +6,36 @@ from typing import Dict, List, Sequence, Tuple, Optional
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 
 @dataclass
 class SessionData:
-    """Container for per-session arrays."""
-    imu: torch.Tensor
-    dlc: torch.Tensor
+    """Container for per-session arrays (full length)."""
+    imu: torch.Tensor  # (L, F_imu)
+    dlc: torch.Tensor  # (L, F_dlc)
 
 
 class RatsWindowDataset(Dataset):
-    """Multi-modal window dataset for rat behaviour.
+    """Full-sequence dataset for rat behaviour.
 
-    The dataset enumerates labelled centre indices for each session and
-    samples a random window length for every access. Zero padding and a
-    boolean mask are returned when the window exceeds sequence bounds.
+    不再在这里裁剪窗口，只加载：
+      - 每个 session 的全长 IMU / DLC 特征
+      - 每个标签帧的索引 + onehot label
 
     Parameters
     ----------
     root: str
-        Root directory of the dataset. Expected structure:
-        ``IMU/<session>/<session>_IMU_features.csv``
-        ``DLC/<session>/final_filtered_<session>_50hz.csv``
-        ``labels/<session>/label_<session>.csv``
-    sessions: Sequence[str]
-        List of session names to load.
-    split: str
-        Either ``"train"`` or ``"test"``. For each session the labelled
-        indices are split 80/20 by time.
-    window_sizes: Sequence[int]
-        Candidate window lengths ``T``. One value is sampled uniformly for
-        every ``__getitem__`` call.
-    session_ranges: Optional[Dict[str, Tuple[int, int]]]
-        Optional mapping ``{session: (start, end)}`` that restricts the
-        usable labelled indices for each session to the half-open interval
-        ``[start, end)``.
+        Root directory. Expect structure:
+        IMU/<session>/<session>_IMU_features.csv
+        DLC/<session>/final_filtered_<session>_50hz.csv
+        labels/<session>/label_<session>.csv
+    sessions: list[str]
+        要载入的 session 名称
+    split: {"train", "test"}
+        80/20 时间切分
+    session_ranges: dict[str, (start, end)]
+        限定使用的索引范围
     """
 
     def __init__(
@@ -50,7 +43,6 @@ class RatsWindowDataset(Dataset):
         root: str,
         sessions: Sequence[str],
         split: str = "train",
-        window_sizes: Sequence[int] = (16, 32, 64, 128, 256, 512),
         session_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> None:
         super().__init__()
@@ -58,17 +50,16 @@ class RatsWindowDataset(Dataset):
         self.root = root
         self.sessions = list(sessions)
         self.split = split
-        self.window_sizes = list(window_sizes)
         self.session_ranges = session_ranges or {}
 
-        # map session names to consecutive indices for domain-aware models
+        # map session names to consecutive indices
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
 
         self.data: Dict[str, SessionData] = {}
-        self.samples: List[Tuple[str, torch.Tensor]] = []
-        self.ranges: List[Dict[int, Tuple[int, int]]] = []
+        # 每个样本： (session_name, label_tensor, centre_index)
+        self.samples: List[Tuple[str, torch.Tensor, int]] = []
 
-        for sid, session in enumerate(self.sessions):
+        for session in self.sessions:
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features.csv")
             dlc_file = os.path.join(root, "DLC", session, f"final_filtered_{session}_50hz.csv")
             label_file = os.path.join(root, "labels", session, f"label_{session}.csv")
@@ -77,23 +68,26 @@ class RatsWindowDataset(Dataset):
             dlc_df = pd.read_csv(dlc_file)
             label_df = pd.read_csv(label_file)
 
-            # ensure same length
+            # 对齐长度
             min_len = min(len(imu_df), len(dlc_df))
             imu = torch.from_numpy(imu_df.iloc[:min_len].to_numpy(dtype=np.float32))
             dlc = torch.from_numpy(dlc_df.iloc[:min_len].to_numpy(dtype=np.float32))
             self.data[session] = SessionData(imu=imu, dlc=dlc)
 
+            # label: 只保留非全零
             label_df = label_df[label_df.drop(columns=["Index"]).any(axis=1)]
             label_df = label_df.sort_values("Index")
             indices = label_df["Index"].to_numpy(dtype=int)
             labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
 
+            # 可选限制范围
             if session in self.session_ranges:
                 start, end = self.session_ranges[session]
                 m = (indices >= start) & (indices < end)
                 indices = indices[m]
                 labels = labels[m]
 
+            # 80/20 split
             n_train = int(len(indices) * 0.8)
             if split == "train":
                 idx_split = slice(0, n_train)
@@ -102,80 +96,18 @@ class RatsWindowDataset(Dataset):
 
             for centre, lab in zip(indices[idx_split], labels[idx_split]):
                 lab_tensor = torch.from_numpy(lab)
-                ranges: Dict[int, Tuple[int, int]] = {}
-                for T in self.window_sizes:
-                    half = T // 2
-                    if T % 2:
-                        start = centre - half
-                        end = centre + half + 1
-                    else:
-                        start = centre - half
-                        end = centre + half
-                    ranges[T] = (start, end)
-                self.samples.append((session, lab_tensor))
-                self.ranges.append(ranges)
+                self.samples.append((session, lab_tensor, int(centre)))
 
         self.num_labels = self.samples[0][1].shape[-1] if self.samples else 0
 
-    def __len__(self) -> int:  # pragma: no cover - simple
+    def __len__(self) -> int:
         return len(self.samples)
 
-    def _crop_with_pad(self, arr: torch.Tensor, start: int, end: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        T = end - start
-        s = max(start, 0)
-        e = min(end, arr.shape[0])
-        out = arr[s:e]
-        pad_left = s - start
-        pad_right = end - e
-        if pad_left or pad_right:
-            out = F.pad(out, (0, 0, pad_left, pad_right))
-        mask = torch.zeros(T, dtype=torch.bool)
-        mask[pad_left:pad_left + (e - s)] = True
-        return out, mask
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | int | str]:  # pragma: no cover - I/O heavy
-        session, label = self.samples[idx]
-        ranges = self.ranges[idx]
-        T = random.choice(self.window_sizes)
-        start, end = ranges[T]
-        data = self.data[session]
-        imu, mask = self._crop_with_pad(data.imu, start, end)
-        dlc, _ = self._crop_with_pad(data.dlc, start, end)
+    def __getitem__(self, idx: int):
+        session, label, centre = self.samples[idx]
         return {
-            "imu": imu,
-            "dlc": dlc,
-            "mask": mask,
-            "label": label,
             "session": session,
             "session_idx": self.session_to_idx[session],
+            "label": label,
+            "centre": centre,
         }
-
-
-def collate_fn(batch: List[Dict[str, torch.Tensor]]):
-    """Custom collate to pad variable-length windows."""
-    max_T = max(item["imu"].shape[0] for item in batch)
-    feat_imu = batch[0]["imu"].shape[1]
-    feat_dlc = batch[0]["dlc"].shape[1]
-
-    imu = torch.zeros(len(batch), max_T, feat_imu)
-    dlc = torch.zeros(len(batch), max_T, feat_dlc)
-    mask = torch.zeros(len(batch), max_T, dtype=torch.bool)
-    labels = torch.stack([item["label"] for item in batch])
-
-    sessions = []
-    session_idx = torch.tensor([item["session_idx"] for item in batch], dtype=torch.long)
-    for i, item in enumerate(batch):
-        T = item["imu"].shape[0]
-        imu[i, :T] = item["imu"]
-        dlc[i, :T] = item["dlc"]
-        mask[i, :T] = item["mask"]
-        sessions.append(item["session"])
-
-    return {
-        "imu": imu,
-        "dlc": dlc,
-        "mask": mask,
-        "label": labels,
-        "session": sessions,
-        "session_idx": session_idx,
-    }
