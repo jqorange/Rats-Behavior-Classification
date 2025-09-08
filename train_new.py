@@ -18,6 +18,7 @@ from models.fusion import EncoderFusion
 from models.losses import (
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
+    positive_only_supcon_loss,
 )
 import torch.nn.functional as F
 
@@ -82,14 +83,43 @@ class ThreeStageTrainer:
             loss = loss_contrast + loss_cs + loss_mse
         return loss
 
+    def _step_sup_stage2(self, batch: dict) -> torch.Tensor:
+        imu = self._sanitize_inplace(batch["imu"].to(self.device))
+        dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
+        labels = batch["label"].to(self.device)
+        session_idx = batch["session_idx"].to(self.device)
+
+        scale = torch.empty(imu.size(0), 1, 1, device=imu.device).uniform_(0.8, 1.2)
+        imu = imu * scale
+        dlc = dlc * scale
+
+        with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
+            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
+            jitter_std = 0.01
+            emb = emb + torch.randn_like(emb) * jitter_std
+            loss_sup = positive_only_supcon_loss(emb, labels)
+            loss_cs = (
+                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
+                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+            )
+            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
+            loss = loss_sup + loss_cs + loss_mse
+        return loss
+
     def _step_sup(self, batch: dict) -> torch.Tensor:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
         labels = batch["label"].to(self.device)
         session_idx = batch["session_idx"].to(self.device)
 
+        scale = torch.empty(imu.size(0), 1, 1, device=imu.device).uniform_(0.8, 1.2)
+        imu = imu * scale
+        dlc = dlc * scale
+
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
             emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
+            jitter_std = 0.01
+            emb = emb + torch.randn_like(emb) * jitter_std
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
             loss_cs = (
                 1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
@@ -141,7 +171,7 @@ class ThreeStageTrainer:
             self._run_epoch(it_unsup, self._step_unsup)
 
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
-            self._run_epoch(it_sup, self._step_sup)
+            self._run_epoch(it_sup, self._step_sup_stage2)
 
     def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
         """联训：有监督 + 无监督都在混 session 的 batch 上进行。"""
