@@ -50,10 +50,30 @@ class ThreeStageTrainer:
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
         session_idx = batch["session_idx"].to(self.device, dtype=torch.long)
 
-        # ✅ 新 API
+        def _crop_and_scale(x1: torch.Tensor, x2: torch.Tensor, ratio: float = 0.8):
+            """Randomly crop the same 80% window and apply random scaling."""
+            B, T, D1 = x1.shape
+            crop_len = max(int(T * ratio), 1)
+            start = torch.randint(0, T - crop_len + 1, (B,), device=x1.device)
+            idx = start[:, None] + torch.arange(crop_len, device=x1.device)[None, :]
+            idx = idx.unsqueeze(-1)
+            x1_crop = torch.gather(x1, 1, idx.expand(-1, -1, D1))
+            x2_crop = torch.gather(x2, 1, idx.expand(-1, -1, x2.size(2)))
+            scales = torch.empty(B, 1, 1, device=x1.device).uniform_(0.8, 1.2)
+            return x1_crop * scales, x2_crop * scales
+
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
-            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
-            loss_contrast = hierarchical_contrastive_loss(emb, emb)
+            imu1, dlc1 = _crop_and_scale(imu, dlc)
+            imu2, dlc2 = _crop_and_scale(imu, dlc)
+
+            emb1, A_self, B_self, A_to_B, B_to_A = self.model(imu1, dlc1, session_idx=session_idx)
+            emb2, *_ = self.model(imu2, dlc2, session_idx=session_idx)
+
+            jitter_std = 0.01
+            emb1 = emb1 + torch.randn_like(emb1) * jitter_std
+            emb2 = emb2 + torch.randn_like(emb2) * jitter_std
+
+            loss_contrast = hierarchical_contrastive_loss(emb1, emb2)
             loss_cs = (
                 1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
                 + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
