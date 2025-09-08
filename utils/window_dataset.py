@@ -54,6 +54,9 @@ class RatsWindowDataset(Dataset):
         self.split = split
         self.window_sizes = list(window_sizes)
 
+        # map session names to consecutive indices for domain-aware models
+        self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
+
         self.data: Dict[str, SessionData] = {}
         self.samples: List[Tuple[str, int, np.ndarray]] = []
 
@@ -104,7 +107,7 @@ class RatsWindowDataset(Dataset):
         mask[out_start:out_end] = True
         return out, mask
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:  # pragma: no cover - I/O heavy
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor | int | str]:  # pragma: no cover - I/O heavy
         session, centre, label = self.samples[idx]
         T = random.choice(self.window_sizes)
         half = T // 2
@@ -123,6 +126,7 @@ class RatsWindowDataset(Dataset):
             "mask": torch.from_numpy(mask),
             "label": torch.from_numpy(label),
             "session": session,
+            "session_idx": self.session_to_idx[session],
         }
 
 
@@ -138,6 +142,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]):
     labels = torch.stack([item["label"] for item in batch])
 
     sessions = []
+    session_idx = torch.tensor([item["session_idx"] for item in batch], dtype=torch.long)
     for i, item in enumerate(batch):
         T = item["imu"].shape[0]
         imu[i, :T] = item["imu"]
@@ -151,4 +156,5 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]):
         "mask": mask,
         "label": labels,
         "session": sessions,
+        "session_idx": session_idx,
     }
