@@ -1,7 +1,7 @@
 import os
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,10 @@ class RatsWindowDataset(Dataset):
     window_sizes: Sequence[int]
         Candidate window lengths ``T``. One value is sampled uniformly for
         every ``__getitem__`` call.
+    session_ranges: Optional[Dict[str, Tuple[int, int]]]
+        Optional mapping ``{session: (start, end)}`` that restricts the
+        usable labelled indices for each session to the half-open interval
+        ``[start, end)``.
     """
 
     def __init__(
@@ -47,6 +51,7 @@ class RatsWindowDataset(Dataset):
         sessions: Sequence[str],
         split: str = "train",
         window_sizes: Sequence[int] = (16, 32, 64, 128, 256, 512),
+        session_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
     ) -> None:
         super().__init__()
         assert split in {"train", "test"}
@@ -54,6 +59,7 @@ class RatsWindowDataset(Dataset):
         self.sessions = list(sessions)
         self.split = split
         self.window_sizes = list(window_sizes)
+        self.session_ranges = session_ranges or {}
 
         # map session names to consecutive indices for domain-aware models
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
@@ -81,6 +87,12 @@ class RatsWindowDataset(Dataset):
             label_df = label_df.sort_values("Index")
             indices = label_df["Index"].to_numpy(dtype=int)
             labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
+
+            if session in self.session_ranges:
+                start, end = self.session_ranges[session]
+                m = (indices >= start) & (indices < end)
+                indices = indices[m]
+                labels = labels[m]
 
             n_train = int(len(indices) * 0.8)
             if split == "train":

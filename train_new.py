@@ -7,14 +7,12 @@ optimisation details are left as TODO items.
 
 from __future__ import annotations
 
-import os
 from typing import Sequence
 
 import torch
-from torch.utils.data import DataLoader
 
-from utils.window_dataset import RatsWindowDataset, collate_fn
-from utils.samplers import SessionBatchSampler
+from utils.window_dataset import RatsWindowDataset
+from utils.preprocess import preprocess_dataset, load_preprocessed_batches
 from models.fusion import EncoderFusion
 from models.losses import (
     hierarchical_contrastive_loss,
@@ -29,7 +27,7 @@ class ThreeStageTrainer:
     Only a subset of the losses is implemented for brevity.
     """
 
-    def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions:int, device: str = "cpu") -> None:
+    def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions: int, device: str = "cpu") -> None:
         self.device = device
         self.model = EncoderFusion(
             N_feat_A=num_features_imu,
@@ -41,6 +39,7 @@ class ThreeStageTrainer:
         ).to(device)
         self.proj = torch.nn.Linear(64, 64).to(device)
         self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.scaler = torch.cuda.amp.GradScaler()
 
     def _step_unsup(self, batch: dict) -> torch.Tensor:
         imu = batch["imu"].to(self.device)
@@ -59,18 +58,25 @@ class ThreeStageTrainer:
         loss = multilabel_supcon_loss_bt(emb, labels)
         return loss
 
-    def stage1(self, loader: DataLoader, epochs: int = 1) -> None:
+    def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1) -> None:
         """Unsupervised contrastive learning within each session."""
 
         self.model.train()
         for _ in range(epochs):
-            for batch in tqdm(loader):
+            preprocess_dataset(dataset, batch_size)
+            for batch in tqdm(
+                load_preprocessed_batches(
+                    dataset.sessions, dataset.session_to_idx, mix=False
+                )
+            ):
                 self.opt.zero_grad()
-                loss = self._step_unsup(batch)
-                loss.backward()
-                self.opt.step()
+                with torch.cuda.amp.autocast():
+                    loss = self._step_unsup(batch)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
 
-    def stage2(self, loader_unsup: DataLoader, loader_sup: DataLoader, epochs: int = 1) -> None:
+    def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1) -> None:
         """Supervised learning with frozen encoders.
 
         The unsupervised batches are restricted to single sessions while the
@@ -83,65 +89,60 @@ class ThreeStageTrainer:
             p.requires_grad = False
         self.model.train()
         for _ in range(epochs):
-            for batch in loader_unsup:
+            preprocess_dataset(dataset, batch_size)
+            for batch in load_preprocessed_batches(
+                dataset.sessions, dataset.session_to_idx, mix=False
+            ):
                 self.opt.zero_grad()
-                loss = self._step_unsup(batch)
-                loss.backward()
-                self.opt.step()
-            for batch in loader_sup:
+                with torch.cuda.amp.autocast():
+                    loss = self._step_unsup(batch)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
+            for batch in load_preprocessed_batches(
+                dataset.sessions, dataset.session_to_idx, mix=True
+            ):
                 self.opt.zero_grad()
-                loss = self._step_sup(batch)
-                loss.backward()
-                self.opt.step()
+                with torch.cuda.amp.autocast():
+                    loss = self._step_sup(batch)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
 
-    def stage3(self, loader: DataLoader, epochs: int = 1) -> None:
+    def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1) -> None:
         """Joint supervised and unsupervised learning across sessions."""
 
         for p in self.model.parameters():
             p.requires_grad = True
         self.model.train()
         for _ in range(epochs):
-            for batch in loader:
+            preprocess_dataset(dataset, batch_size)
+            for batch in load_preprocessed_batches(
+                dataset.sessions, dataset.session_to_idx, mix=True
+            ):
                 self.opt.zero_grad()
-                loss = self._step_sup(batch) + self._step_unsup(batch)
-                loss.backward()
-                self.opt.step()
-
-
-def build_loaders(
-    root: str, sessions: Sequence[str], batch_size: int = 8
-) -> tuple[DataLoader, DataLoader, DataLoader]:
-    """Build loaders for session-restricted and mixed batches."""
-
-    train_ds = RatsWindowDataset(root, sessions, split="train")
-    test_ds = RatsWindowDataset(root, sessions, split="test")
-
-    session_sampler = SessionBatchSampler(
-        [s for s, _, _ in train_ds.samples], batch_size=batch_size
-    )
-    session_loader = DataLoader(
-        train_ds, batch_sampler=session_sampler, collate_fn=collate_fn
-    )
-    mixed_loader = DataLoader(
-        train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn
-    )
-    test_loader = DataLoader(
-        test_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn
-    )
-    return session_loader, mixed_loader, test_loader
+                with torch.cuda.amp.autocast():
+                    loss = self._step_sup(batch) + self._step_unsup(batch)
+                self.scaler.scale(loss).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
 
 
 def main() -> None:  # pragma: no cover - entry point
-    data_root = "D:\Jiaqi\Datasets\Rats\TrainData_new"
+    data_root = "D:\\Jiaqi\\Datasets\\Rats\\TrainData_new"
     sessions = ["F3D5_outdoor", "F3D6_outdoor"]
-    session_loader, mixed_loader, _ = build_loaders(data_root, sessions,batch_size=256)
-    num_feat_imu = mixed_loader.dataset.data[sessions[0]].imu.shape[1]
-    num_feat_dlc = mixed_loader.dataset.data[sessions[0]].dlc.shape[1]
+    batch_size = 256
+    session_ranges = None  # e.g. {"F3D5_outdoor": (0, 10000)} to limit data
+    train_ds = RatsWindowDataset(
+        data_root, sessions, split="train", session_ranges=session_ranges
+    )
+    num_feat_imu = train_ds.data[sessions[0]].imu.shape[1]
+    num_feat_dlc = train_ds.data[sessions[0]].dlc.shape[1]
     num_sessions = len(sessions)
-    trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc,num_sessions)
-    trainer.stage1(session_loader, epochs=1)
-    trainer.stage2(session_loader, mixed_loader, epochs=1)
-    trainer.stage3(mixed_loader, epochs=1)
+    trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc, num_sessions)
+    trainer.stage1(train_ds, batch_size, epochs=1)
+    trainer.stage2(train_ds, batch_size, epochs=1)
+    trainer.stage3(train_ds, batch_size, epochs=1)
 
 
 if __name__ == "__main__":  # pragma: no cover
