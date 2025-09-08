@@ -78,6 +78,8 @@ class EncoderFusion(nn.Module):
 
         Returns:
             h: [B, T, D] fused representation after projector + L2 norm
+            A_self, B_self: modality-specific representations
+            A_to_B, B_to_A: cross-modal predictions
         """
         B, T = xA.shape[:2]
         device = xA.device
@@ -113,4 +115,5 @@ class EncoderFusion(nn.Module):
         h = self.projection(h, session_idx)                # [B, T, D]
         h = F.normalize(h, dim=-1)
 
-        return h, A_to_B, B_to_A
+        # Also return self representations for cross-modal reconstruction losses
+        return h, A_self, B_self, A_to_B, B_to_A

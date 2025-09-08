@@ -170,9 +170,9 @@ def compute_contrastive_losses(self, xA, xB, labels, fused_repr,session_idx, is_
         xB_crop2 = take_per_row(xB, crop_offset + crop_left, crop_eright - crop_left)
 
 
-        out1 = self.encoder_fusion(xA_crop1, xB_crop1,session_idx)
+        out1, *_ = self.encoder_fusion(xA_crop1, xB_crop1, session_idx)
         out1 = out1[:, -crop_l:]
-        out2 = self.encoder_fusion(xA_crop2, xB_crop2, session_idx)
+        out2, *_ = self.encoder_fusion(xA_crop2, xB_crop2, session_idx)
         out2 = out2[:, :crop_l]
         #
         # ----- Step 3: jitter after encoding -----

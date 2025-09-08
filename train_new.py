@@ -19,6 +19,7 @@ from models.losses import (
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
 )
+import torch.nn.functional as F
 
 
 class ThreeStageTrainer:
@@ -51,8 +52,14 @@ class ThreeStageTrainer:
 
         # ✅ 新 API
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
-            emb, _, _ = self.model(imu, dlc, session_idx=session_idx)
-            loss = hierarchical_contrastive_loss(emb, emb)
+            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
+            loss_contrast = hierarchical_contrastive_loss(emb, emb)
+            loss_cs = (
+                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
+                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+            )
+            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
+            loss = loss_contrast + loss_cs + loss_mse
         return loss
 
     def _step_sup(self, batch: dict) -> torch.Tensor:
@@ -62,8 +69,14 @@ class ThreeStageTrainer:
         session_idx = batch["session_idx"].to(self.device)
 
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
-            emb, _, _ = self.model(imu, dlc, session_idx=session_idx)
-            loss = multilabel_supcon_loss_bt(emb, labels)
+            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
+            loss_sup = multilabel_supcon_loss_bt(emb, labels)
+            loss_cs = (
+                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
+                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+            )
+            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
+            loss = loss_sup + loss_cs + loss_mse
         return loss
 
     def _run_epoch(self, iterator, step_fn):
