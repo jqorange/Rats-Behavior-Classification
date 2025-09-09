@@ -20,8 +20,8 @@ from models.losses import (
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
     positive_only_supcon_loss,
+    gaussian_cs_divergence,
 )
-import torch.nn.functional as F
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from models.domain_adapter import DomainAdapter
 
@@ -81,15 +81,18 @@ class ThreeStageTrainer:
 
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2)
             loss_cs = (
-                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
-                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+                gaussian_cs_divergence(A_to_B, B_self.detach())
+                + gaussian_cs_divergence(B_to_A, A_self.detach())
             )
-            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
-            loss = loss_contrast + loss_cs + loss_mse
+            loss_l2 = (
+                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
+                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
+            )
+            loss = loss_contrast + loss_cs + loss_l2
         return loss, {
             "loss_contrast": loss_contrast.detach(),
             "loss_cs": loss_cs.detach(),
-            "loss_mse": loss_mse.detach(),
+            "loss_l2": loss_l2.detach(),
         }
 
     def _step_sup_stage2(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -108,15 +111,18 @@ class ThreeStageTrainer:
             emb = emb + torch.randn_like(emb) * jitter_std
             loss_sup = positive_only_supcon_loss(emb, labels)
             loss_cs = (
-                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
-                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+                gaussian_cs_divergence(A_to_B, B_self.detach())
+                + gaussian_cs_divergence(B_to_A, A_self.detach())
             )
-            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
-            loss = loss_sup + loss_cs + loss_mse
+            loss_l2 = (
+                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
+                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
+            )
+            loss = loss_sup + loss_cs + loss_l2
         return loss, {
             "loss_sup": loss_sup.detach(),
             "loss_cs": loss_cs.detach(),
-            "loss_mse": loss_mse.detach(),
+            "loss_l2": loss_l2.detach(),
         }
 
     def _step_sup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -135,15 +141,18 @@ class ThreeStageTrainer:
             emb = emb + torch.randn_like(emb) * jitter_std
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
             loss_cs = (
-                1 - F.cosine_similarity(A_to_B, B_self, dim=-1).mean()
-                + 1 - F.cosine_similarity(B_to_A, A_self, dim=-1).mean()
+                gaussian_cs_divergence(A_to_B, B_self.detach())
+                + gaussian_cs_divergence(B_to_A, A_self.detach())
             )
-            loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
-            loss = loss_sup + loss_cs + loss_mse
+            loss_l2 = (
+                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
+                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
+            )
+            loss = loss_sup + loss_cs + loss_l2
         return loss, {
             "loss_sup": loss_sup.detach(),
             "loss_cs": loss_cs.detach(),
-            "loss_mse": loss_mse.detach(),
+            "loss_l2": loss_l2.detach(),
         }
 
     def _run_epoch(self, iterator, step_fn):
