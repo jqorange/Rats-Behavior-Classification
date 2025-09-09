@@ -60,8 +60,11 @@ class RatsWindowDataset(Dataset):
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
 
         self.data: Dict[str, SessionData] = {}
-        # 每个样本： (session_name, label_tensor, centre_index)
+        # 仅带标签的样本（用于有监督损失）: (session_name, label_tensor, centre_index)
         self.samples: List[Tuple[str, torch.Tensor, int]] = []
+        # 全部帧的样本（用于无监督损失）
+        self.unsup_samples: List[Tuple[str, torch.Tensor, int]] = []
+        self.num_labels = 0
 
         for session in self.sessions:
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features.csv")
@@ -83,6 +86,14 @@ class RatsWindowDataset(Dataset):
             label_df = label_df.sort_values("Index")
             indices = label_df["Index"].to_numpy(dtype=int)
             labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
+
+            # 标签数量（所有 session 应一致）
+            n_labels = labels.shape[1]
+            if not hasattr(self, "num_labels") or self.num_labels == 0:
+                self.num_labels = n_labels
+            else:
+                assert n_labels == self.num_labels, "Inconsistent number of labels"
+            zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
 
             # 限制在最大长度范围内
             m_valid = indices < min_len
@@ -107,7 +118,20 @@ class RatsWindowDataset(Dataset):
                 lab_tensor = torch.from_numpy(lab)
                 self.samples.append((session, lab_tensor, int(centre)))
 
-        self.num_labels = self.samples[0][1].shape[-1] if self.samples else 0
+            # 生成无监督样本：覆盖当前 split 的所有帧
+            n_total = min_len
+            n_train_total = int(n_total * 0.8)
+            if split == "train":
+                unsup_start, unsup_end = 0, n_train_total
+            else:
+                unsup_start, unsup_end = n_train_total, n_total
+            # 可选限制范围也作用于无监督样本
+            if session in self.session_ranges:
+                start, end = self.session_ranges[session]
+                unsup_start = max(unsup_start, start)
+                unsup_end = min(unsup_end, end)
+            for c in range(unsup_start, unsup_end):
+                self.unsup_samples.append((session, zero_label, int(c)))
 
     def __len__(self) -> int:
         return len(self.samples)

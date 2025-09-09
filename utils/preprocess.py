@@ -117,6 +117,7 @@ def _build_session_file(
     groups: List[List[int]],
     Ts: List[int],
     dataset: RatsWindowDataset,
+    samples: List[Tuple[str, torch.Tensor, int]],
     out_dir: str,
     device: str,
     compress: bool,
@@ -135,7 +136,7 @@ def _build_session_file(
 
     feat_imu = int(dataset.data[session].imu.shape[1])
     feat_dlc = int(dataset.data[session].dlc.shape[1])
-    n_labels = int(dataset.samples[0][1].numel())
+    n_labels = int(samples[0][1].numel()) if samples else 0
     batch_size = len(groups[0])
 
     # ---- 预创建 HDF5 dset（按 T 预分配） ----
@@ -191,9 +192,9 @@ def _build_session_file(
                 B_total = len(cur_groups) * batch_size
 
                 flat_indices = [i for g in cur_groups for i in g]
-                flat_centres = [dataset.samples[i][2] for i in flat_indices]  # 每个样本的中心点
+                flat_centres = [samples[i][2] for i in flat_indices]  # 每个样本的中心点
                 starts = torch.tensor([c - (T // 2) for c in flat_centres], device=device, dtype=torch.long)
-                labels = torch.stack([dataset.samples[i][1] for i in flat_indices], dim=0).to(device).float()
+                labels = torch.stack([samples[i][1] for i in flat_indices], dim=0).to(device).float()
 
                 imu_win, mask = _batch_crop_rows(imu_rows, starts, T)
                 dlc_win, _    = _batch_crop_rows(dlc_rows, starts, T)
@@ -234,6 +235,7 @@ def preprocess_dataset(
     mask_dtype: str = "uint8",    # "uint8" / "bool"
     window_sizes: Sequence[int] = (16, 32, 64, 128, 256, 512),  # <== 新增
     preproc_shard_batches: int = 8,            # 每次处理/写入的 batch 数
+    use_unlabeled: bool = False,
 ) -> None:
     """
     MAD 归一化（支持缓存/抽样） + 分块向量化裁剪写入（低峰值内存） + 按 session 并行
@@ -248,9 +250,12 @@ def preprocess_dataset(
     if str(device).startswith("cuda") and num_workers and num_workers > 1:
         num_workers = 1
 
+    # 选择使用的样本集合
+    samples = dataset.unsup_samples if use_unlabeled else dataset.samples
+
     # 收集每个 session 的样本索引
     session_to_indices: Dict[str, List[int]] = defaultdict(list)
-    for idx, (sess, _, _) in enumerate(dataset.samples):
+    for idx, (sess, _, _) in enumerate(samples):
         session_to_indices[sess].append(idx)
 
     # 组装 batch（不跨 session）
@@ -294,6 +299,7 @@ def preprocess_dataset(
                         groups_per_session[s],
                         Ts_per_session[s],
                         dataset,
+                        samples,
                         out_dir,
                         device,
                         compress,
@@ -316,6 +322,7 @@ def preprocess_dataset(
                 groups_per_session[s],
                 Ts_per_session[s],
                 dataset,
+                samples,
                 out_dir,
                 device,
                 compress,

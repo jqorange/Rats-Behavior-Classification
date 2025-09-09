@@ -186,13 +186,14 @@ class ThreeStageTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         for ep in range(epochs):
             preprocess_dataset(
-                dataset, batch_size, out_dir="Dataset",
+                dataset, batch_size, out_dir="Dataset_unsup",
                 group_mode="by_session",
                 assign_T="round_robin",       # 各 T 均衡
                 num_workers=n_workers_preproc,
                 seed=42 + ep,                 # 每个 epoch 改变 seed，获得新的切窗
+                use_unlabeled=True,
             )
-            it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
+            it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
             losses = self._run_epoch(it, self._step_unsup)
             self.total_epochs += 1
             print(f"[Stage1][Epoch {self.total_epochs}] " + " ".join(f"{k}={v:.4f}" for k, v in losses.items()))
@@ -220,16 +221,25 @@ class ThreeStageTrainer:
 
         for ep in range(epochs):
             preprocess_dataset(
-                dataset, batch_size, out_dir="Dataset",
+                dataset, batch_size, out_dir="Dataset_unsup",
                 group_mode="by_session",
                 assign_T="round_robin",
                 num_workers=n_workers_preproc,
                 seed=1234 + ep,
+                use_unlabeled=True,
             )
-            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
+            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
             losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
 
-            it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
+            preprocess_dataset(
+                dataset, batch_size, out_dir="Dataset_sup",
+                group_mode="by_session",
+                assign_T="round_robin",
+                num_workers=n_workers_preproc,
+                seed=1234 + ep,
+                use_unlabeled=False,
+            )
+            it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
             losses_sup = self._run_epoch(it_sup, self._step_sup_stage2)
             combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
             combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
@@ -254,27 +264,34 @@ class ThreeStageTrainer:
 
         for ep in range(epochs):
             preprocess_dataset(
-                dataset, batch_size, out_dir="Dataset",
+                dataset, batch_size, out_dir="Dataset_unsup",
                 group_mode="by_session",
                 assign_T="round_robin",
                 device="cuda",
                 num_workers=n_workers_preproc,
                 seed=5678 + ep,
+                use_unlabeled=True,
             )
-            it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
-            # 这里简单相加，有需要可加权
-            def step_joint(b):
-                loss_sup, info_sup = self._step_sup(b)
-                loss_unsup, info_unsup = self._step_unsup(b)
-                info = {f"sup_{k}": v for k, v in info_sup.items()}
-                info.update({f"unsup_{k}": v for k, v in info_unsup.items()})
-                info["sup_total"] = loss_sup.detach()
-                info["unsup_total"] = loss_unsup.detach()
-                return loss_sup + loss_unsup, info
+            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=True)
+            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
 
-            losses = self._run_epoch(it, step_joint)
+            preprocess_dataset(
+                dataset, batch_size, out_dir="Dataset_sup",
+                group_mode="by_session",
+                assign_T="round_robin",
+                device="cuda",
+                num_workers=n_workers_preproc,
+                seed=5678 + ep,
+                use_unlabeled=False,
+            )
+            it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
+            losses_sup = self._run_epoch(it_sup, self._step_sup)
+
+            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
+            combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
+            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
             self.total_epochs += 1
-            print(f"[Stage3][Epoch {self.total_epochs}] " + " ".join(f"{k}={v:.4f}" for k, v in losses.items()))
+            print(f"[Stage3][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
