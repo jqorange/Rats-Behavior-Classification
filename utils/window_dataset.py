@@ -36,6 +36,8 @@ class RatsWindowDataset(Dataset):
         80/20 时间切分
     session_ranges: dict[str, (start, end)]
         限定使用的索引范围
+    max_len_per_session: int
+        每个 session 载入的最大帧数，默认 150000，用于节省内存
     """
 
     def __init__(
@@ -44,6 +46,7 @@ class RatsWindowDataset(Dataset):
         sessions: Sequence[str],
         split: str = "train",
         session_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
+        max_len_per_session: int = 150_000,
     ) -> None:
         super().__init__()
         assert split in {"train", "test"}
@@ -51,6 +54,7 @@ class RatsWindowDataset(Dataset):
         self.sessions = list(sessions)
         self.split = split
         self.session_ranges = session_ranges or {}
+        self.max_len_per_session = max_len_per_session
 
         # map session names to consecutive indices
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
@@ -64,8 +68,8 @@ class RatsWindowDataset(Dataset):
             dlc_file = os.path.join(root, "DLC", session, f"final_filtered_{session}_50hz.csv")
             label_file = os.path.join(root, "labels", session, f"label_{session}.csv")
 
-            imu_df = pd.read_csv(imu_file)
-            dlc_df = pd.read_csv(dlc_file)
+            imu_df = pd.read_csv(imu_file, nrows=self.max_len_per_session)
+            dlc_df = pd.read_csv(dlc_file, nrows=self.max_len_per_session)
             label_df = pd.read_csv(label_file)
 
             # 对齐长度
@@ -79,6 +83,11 @@ class RatsWindowDataset(Dataset):
             label_df = label_df.sort_values("Index")
             indices = label_df["Index"].to_numpy(dtype=int)
             labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
+
+            # 限制在最大长度范围内
+            m_valid = indices < min_len
+            indices = indices[m_valid]
+            labels = labels[m_valid]
 
             # 可选限制范围
             if session in self.session_ranges:
