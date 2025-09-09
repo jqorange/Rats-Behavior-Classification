@@ -112,7 +112,8 @@ class EncoderFusion(nn.Module):
         h = torch.clamp(h, min=-5.0, max=5.0)
 
         # === Final projector (session aware if enabled) + L2 normalize ===
-        h = self.projection(h, session_idx)                # [B, T, D]
+        proj_idx = session_idx if self.projection.mode == "aware" else None
+        h = self.projection(h, proj_idx)                # [B, T, D]
         h = F.normalize(h, dim=-1)
 
         # Also return self representations for cross-modal reconstruction losses
