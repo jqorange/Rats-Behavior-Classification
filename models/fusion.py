@@ -11,9 +11,10 @@ class EncoderFusion(nn.Module):
     - Two encoders (A/B), each returns (z_self, z_cross).
       * z_self  : in own modality space
       * z_cross : predicted embedding in the *other* modality space
-    - Cross-attn is single-direction but *randomly* picks from 2×2 combos with equal prob (25% each):
-        Query  ∈ { A_self,  B_to_A }
-        Key/Val∈ { B_self,  A_to_B }
+    - Cross-attn is single-direction but randomly selects among three combos:
+        * Query from {B_self, A_to_B}
+        * Key/Val from {A_self, B_to_A}
+      The pair (A_to_B, B_to_A) is excluded.
     - Gated residual fusion on the query side; final projector + L2 norm.
 
     NOTE:
@@ -60,16 +61,19 @@ class EncoderFusion(nn.Module):
     @torch.no_grad()
     def _sample_combo_indices(self, device):
         """
-        Uniformly sample the 2×2 choices with equal probability.
+        Uniformly sample among three valid (query, key/value) combos.
+        Combos:
+            (q=B_self, kv=A_self),
+            (q=B_self, kv=B_to_A),
+            (q=A_to_B, kv=A_self)
         Returns:
-            idx_q  ∈ {0,1}, where 0->use A_self ; 1->use B_to_A as Query
-            idx_kv ∈ {0,1}, where 0->use B_self ; 1->use A_to_B as Key/Value
+            idx_q, idx_kv corresponding to entries in q_candidates/kv_candidates.
         """
-        idx_q  = torch.randint(0, 2, (1,), device=device).item()
-        idx_kv = torch.randint(0, 2, (1,), device=device).item()
-        return idx_q, idx_kv
+        combos = torch.tensor([[0, 0], [0, 1], [1, 0]], device=device)
+        choice = torch.randint(0, combos.size(0), (1,), device=device).item()
+        return combos[choice].tolist()
 
-    def forward(self, xA, xB, session_idx=None):
+    def forward(self, xA, xB, session_idx=None, attn_mode: str | None = None):
         """
         Args:
             xA: [B, T, N_feat_A]
@@ -91,14 +95,25 @@ class EncoderFusion(nn.Module):
         A_self, A_to_B = self.encoderA(xA, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
         B_self, B_to_A = self.encoderB(xB, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
 
-        # === Build 2×2 candidates ===
-        # Query candidates are in A-space:  {A_self, B_to_A}
-        # Key/Value candidates are in B-space: {B_self, A_to_B}
+        # === Build candidate sets ===
+        # Query candidates (B-space):  {B_self, A_to_B}
+        # Key/Value candidates (A-space): {A_self, B_to_A}
         kv_candidates  = (A_self, B_to_A)
         q_candidates = (B_self, A_to_B)
 
-        # === Sample one of the four combos (25% each) ===
-        idx_q, idx_kv = self._sample_combo_indices(device)
+        # === Select cross-attention pair ===
+        if attn_mode is None:
+            idx_q, idx_kv = self._sample_combo_indices(device)
+        else:
+            attn_mode = attn_mode.lower()
+            if attn_mode == 'imu':           # A with A_to_B
+                idx_q, idx_kv = 1, 0
+            elif attn_mode == 'dlc':         # B with B_to_A
+                idx_q, idx_kv = 0, 1
+            elif attn_mode == 'both':        # A with B
+                idx_q, idx_kv = 0, 0
+            else:
+                raise ValueError(f"Unknown attn_mode: {attn_mode}")
         q  = q_candidates[idx_q]      # [B, T, D]
         kv = kv_candidates[idx_kv]    # [B, T, D]
 
