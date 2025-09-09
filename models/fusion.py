@@ -94,8 +94,8 @@ class EncoderFusion(nn.Module):
         # === Build 2×2 candidates ===
         # Query candidates are in A-space:  {A_self, B_to_A}
         # Key/Value candidates are in B-space: {B_self, A_to_B}
-        q_candidates  = (A_self, B_to_A)
-        kv_candidates = (B_self, A_to_B)
+        kv_candidates  = (A_self, B_to_A)
+        q_candidates = (B_self, A_to_B)
 
         # === Sample one of the four combos (25% each) ===
         idx_q, idx_kv = self._sample_combo_indices(device)
