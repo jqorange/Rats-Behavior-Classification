@@ -22,25 +22,25 @@ from models.losses import (
 )
 import torch.nn.functional as F
 from utils.checkpoint import save_checkpoint, load_checkpoint
+from models.domain_adapter import DomainAdapter
 
 
 class ThreeStageTrainer:
     def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions: int, device: str | None = None) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_sessions = num_sessions
+        self.d_model = 64
         self.model = EncoderFusion(
             N_feat_A=num_features_imu,
             N_feat_B=num_features_dlc,
             mask_type="binomial",  # 如不需要特征丢弃，可直接改为 None
-            d_model=64,
+            d_model=self.d_model,
             nhead=4,
             num_sessions=num_sessions,
             # 如果你的 EncoderFusion/encoder 支持传入概率参数，建议同时传：
             # drop_prob=0.1,
         ).to(self.device)
-        self.proj = torch.nn.Linear(64, 64).to(self.device)
-        self.opt = torch.optim.Adam(
-            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
-        )
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         self.total_epochs = 0
 
         # ✅ 新 API
@@ -146,7 +146,7 @@ class ThreeStageTrainer:
     def load_from(self, path: str, expected_stage: int) -> int:
         """加载 checkpoint 并返回其中记录的阶段。"""
         self.total_epochs, stage = load_checkpoint(
-            self.model, self.proj, self.opt, path, expected_stage=expected_stage
+            self.model, self.model.projection, self.opt, path, expected_stage=expected_stage
         )
         return stage
 
@@ -154,11 +154,7 @@ class ThreeStageTrainer:
         """无监督学习：每个 batch 内不混 session（by_session），每组统一 T。"""
         for p in self.model.parameters():
             p.requires_grad = True
-        for p in self.proj.parameters():
-            p.requires_grad = True
-        self.opt = torch.optim.Adam(
-            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
-        )
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
         for ep in range(epochs):
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset",
@@ -173,7 +169,7 @@ class ThreeStageTrainer:
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
-                    self.proj,
+                    self.model.projection,
                     self.opt,
                     total_epochs=self.total_epochs,
                     stage=1,
@@ -182,11 +178,15 @@ class ThreeStageTrainer:
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """冻结编码器：先无监督（不混 session），再有监督（混 session）。"""
+        # Freeze encoder + cross-attn etc., only train a new projection head
+        # 构建新的 session-adapt projector（与 Stage1 不同）
+        self.model.projection = DomainAdapter(self.d_model, self.d_model, num_sessions=self.num_sessions, dropout=0.1).to(self.device)
+        self.model.projection.set_mode("align")
         for p in self.model.parameters():
             p.requires_grad = False
-        for p in self.proj.parameters():
+        for p in self.model.projection.parameters():
             p.requires_grad = True
-        self.opt = torch.optim.Adam(self.proj.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(self.model.projection.parameters(), lr=1e-3)
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -205,7 +205,7 @@ class ThreeStageTrainer:
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
-                    self.proj,
+                    self.model.projection,
                     self.opt,
                     total_epochs=self.total_epochs,
                     stage=2,
@@ -216,11 +216,7 @@ class ThreeStageTrainer:
         """联训：有监督 + 无监督都在混 session 的 batch 上进行。"""
         for p in self.model.parameters():
             p.requires_grad = True
-        for p in self.proj.parameters():
-            p.requires_grad = True
-        self.opt = torch.optim.Adam(
-            list(self.model.parameters()) + list(self.proj.parameters()), lr=1e-3
-        )
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -240,7 +236,7 @@ class ThreeStageTrainer:
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
-                    self.proj,
+                    self.model.projection,
                     self.opt,
                     total_epochs=self.total_epochs,
                     stage=3,
