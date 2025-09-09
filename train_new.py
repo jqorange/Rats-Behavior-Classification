@@ -7,7 +7,8 @@ Stage3(联训)。预处理阶段新增“按 index 分组、每组统一窗口�
 
 from __future__ import annotations
 import os
-from typing import Sequence
+import argparse
+from typing import Sequence, Dict
 
 import torch
 from tqdm import tqdm
@@ -50,7 +51,7 @@ class ThreeStageTrainer:
         # 把 NaN/Inf 变成 0，防止后续层炸掉
         return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
-    def _step_unsup(self, batch: dict) -> torch.Tensor:
+    def _step_unsup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
         session_idx = batch["session_idx"].to(self.device, dtype=torch.long)
@@ -85,9 +86,13 @@ class ThreeStageTrainer:
             )
             loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
             loss = loss_contrast + loss_cs + loss_mse
-        return loss
+        return loss, {
+            "loss_contrast": loss_contrast.detach(),
+            "loss_cs": loss_cs.detach(),
+            "loss_mse": loss_mse.detach(),
+        }
 
-    def _step_sup_stage2(self, batch: dict) -> torch.Tensor:
+    def _step_sup_stage2(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
         labels = batch["label"].to(self.device)
@@ -108,9 +113,13 @@ class ThreeStageTrainer:
             )
             loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
             loss = loss_sup + loss_cs + loss_mse
-        return loss
+        return loss, {
+            "loss_sup": loss_sup.detach(),
+            "loss_cs": loss_cs.detach(),
+            "loss_mse": loss_mse.detach(),
+        }
 
-    def _step_sup(self, batch: dict) -> torch.Tensor:
+    def _step_sup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
         labels = batch["label"].to(self.device)
@@ -131,17 +140,28 @@ class ThreeStageTrainer:
             )
             loss_mse = F.mse_loss(A_to_B, B_self) + F.mse_loss(B_to_A, A_self)
             loss = loss_sup + loss_cs + loss_mse
-        return loss
+        return loss, {
+            "loss_sup": loss_sup.detach(),
+            "loss_cs": loss_cs.detach(),
+            "loss_mse": loss_mse.detach(),
+        }
 
     def _run_epoch(self, iterator, step_fn):
         self.model.train()
-        batches = list(iterator)  # 先收集
+        batches = list(iterator)
+        loss_sums: Dict[str, float] = {}
         for batch in tqdm(batches, total=len(batches)):
             self.opt.zero_grad(set_to_none=True)
-            loss = step_fn(batch)
+            loss, loss_dict = step_fn(batch)
             self.scaler.scale(loss).backward()
             self.scaler.step(self.opt)
             self.scaler.update()
+            loss_sums["total"] = loss_sums.get("total", 0.0) + loss.item()
+            for k, v in loss_dict.items():
+                loss_sums[k] = loss_sums.get(k, 0.0) + v.item()
+        for k in loss_sums:
+            loss_sums[k] /= max(len(batches), 1)
+        return loss_sums
 
     def load_from(self, path: str, expected_stage: int) -> int:
         """加载 checkpoint 并返回其中记录的阶段。"""
@@ -164,8 +184,9 @@ class ThreeStageTrainer:
                 seed=42 + ep,                 # 每个 epoch 改变 seed，获得新的切窗
             )
             it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
-            self._run_epoch(it, self._step_unsup)
+            losses = self._run_epoch(it, self._step_unsup)
             self.total_epochs += 1
+            print(f"[Stage1][Epoch {self.total_epochs}] " + " ".join(f"{k}={v:.4f}" for k, v in losses.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
@@ -197,11 +218,15 @@ class ThreeStageTrainer:
                 seed=1234 + ep,
             )
             it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
-            self._run_epoch(it_unsup, self._step_unsup)
+            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
 
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
-            self._run_epoch(it_sup, self._step_sup_stage2)
+            losses_sup = self._run_epoch(it_sup, self._step_sup_stage2)
+            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
+            combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
+            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
             self.total_epochs += 1
+            print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
@@ -230,9 +255,17 @@ class ThreeStageTrainer:
             it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
             # 这里简单相加，有需要可加权
             def step_joint(b):
-                return self._step_sup(b) + self._step_unsup(b)
-            self._run_epoch(it, step_joint)
+                loss_sup, info_sup = self._step_sup(b)
+                loss_unsup, info_unsup = self._step_unsup(b)
+                info = {f"sup_{k}": v for k, v in info_sup.items()}
+                info.update({f"unsup_{k}": v for k, v in info_unsup.items()})
+                info["sup_total"] = loss_sup.detach()
+                info["unsup_total"] = loss_unsup.detach()
+                return loss_sup + loss_unsup, info
+
+            losses = self._run_epoch(it, step_joint)
             self.total_epochs += 1
+            print(f"[Stage3][Epoch {self.total_epochs}] " + " ".join(f"{k}={v:.4f}" for k, v in losses.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
@@ -245,6 +278,10 @@ class ThreeStageTrainer:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--resume-epoch", type=int, default=0, help="Resume training from given epoch")
+    args = parser.parse_args()
+
     data_root = r"D:\Jiaqi\Datasets\Rats\TrainData_new"
     sessions = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_2"]
     batch_size = 512
@@ -265,14 +302,61 @@ def main() -> None:
     # 预处理多线程数：HDF5 写还是串行，线程只做裁剪与拼 batch
     n_workers_preproc = 1
 
-    print(">>> Stage 1 (unsupervised)...")
-    trainer.stage1(train_ds, batch_size, epochs=10000, n_workers_preproc=n_workers_preproc, save_gap=1)
+    stage1_epochs = 10000
+    stage2_epochs = 1
+    stage3_epochs = 1
 
-    print(">>> Stage 2 (frozen encoder: unsup + sup)...")
-    trainer.stage2(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
+    start_epoch = args.resume_epoch
+    if start_epoch > 0:
+        if start_epoch <= stage1_epochs:
+            ckpt_stage = 1
+        elif start_epoch <= stage1_epochs + stage2_epochs:
+            ckpt_stage = 2
+        else:
+            ckpt_stage = 3
+        ckpt_path = os.path.join("checkpoints", f"stage{ckpt_stage}_epoch{start_epoch}.pt")
+        trainer.load_from(ckpt_path, expected_stage=ckpt_stage)
 
-    print(">>> Stage 3 (joint training)...")
-    trainer.stage3(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
+    # 根据 epoch 判断从哪阶段开始
+    start_stage = 1
+    if start_epoch > stage1_epochs:
+        start_stage = 2
+    if start_epoch > stage1_epochs + stage2_epochs:
+        start_stage = 3
+
+    if start_stage <= 1:
+        print(">>> Stage 1 (unsupervised)...")
+        trainer.stage1(
+            train_ds,
+            batch_size,
+            epochs=stage1_epochs - start_epoch,
+            n_workers_preproc=n_workers_preproc,
+            save_gap=1,
+        )
+
+    if start_stage <= 2:
+        print(">>> Stage 2 (frozen encoder: unsup + sup)...")
+        remaining2 = stage2_epochs - max(0, start_epoch - stage1_epochs)
+        if remaining2 > 0:
+            trainer.stage2(
+                train_ds,
+                batch_size,
+                epochs=remaining2,
+                n_workers_preproc=n_workers_preproc,
+                save_gap=1,
+            )
+
+    if start_stage <= 3:
+        print(">>> Stage 3 (joint training)...")
+        remaining3 = stage3_epochs - max(0, start_epoch - stage1_epochs - stage2_epochs)
+        if remaining3 > 0:
+            trainer.stage3(
+                train_ds,
+                batch_size,
+                epochs=remaining3,
+                n_workers_preproc=n_workers_preproc,
+                save_gap=1,
+            )
 
 
 if __name__ == "__main__":
