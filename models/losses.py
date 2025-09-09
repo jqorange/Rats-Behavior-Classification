@@ -3,6 +3,58 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
+
+
+def gaussian_cs_divergence(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Closed-form Cauchy-Schwarz divergence under Gaussian approximation.
+
+    Args:
+        x, y: tensors of shape ``[B, T, D]`` representing two sets of features.
+        eps: small value added to covariances for numerical stability.
+
+    Returns:
+        Scalar tensor representing the divergence.
+    """
+
+    B, T, D = x.shape
+    x_flat = x.reshape(-1, D)
+    y_flat = y.reshape(-1, D)
+
+    mu_x = x_flat.mean(dim=0)
+    mu_y = y_flat.mean(dim=0)
+
+    xc = x_flat - mu_x
+    yc = y_flat - mu_y
+
+    cov_x = (xc.T @ xc) / (x_flat.size(0) - 1)
+    cov_y = (yc.T @ yc) / (y_flat.size(0) - 1)
+
+    eye = torch.eye(D, device=x.device)
+    cov_x = cov_x + eps * eye
+    cov_y = cov_y + eps * eye
+
+    cov_mean = 0.5 * (cov_x + cov_y)
+
+    # Eigendecomposition for stable inversion and logdet
+    eig_mean, vec_mean = torch.linalg.eigh(cov_mean)
+    eig_x, _ = torch.linalg.eigh(cov_x)
+    eig_y, _ = torch.linalg.eigh(cov_y)
+
+    # Clamp eigenvalues to ensure positive definiteness
+    eig_mean = eig_mean.clamp_min(eps)
+    eig_x = eig_x.clamp_min(eps)
+    eig_y = eig_y.clamp_min(eps)
+
+    inv_cov = vec_mean @ torch.diag(eig_mean.reciprocal()) @ vec_mean.t()
+    diff = (mu_x - mu_y).unsqueeze(0)  # 1 x D
+    term_mean = 0.25 * (diff @ inv_cov @ diff.t()).squeeze()
+
+    logdet_mean = torch.log(eig_mean).sum()
+    logdet_x = torch.log(eig_x).sum()
+    logdet_y = torch.log(eig_y).sum()
+    term_cov = 0.5 * logdet_mean - 0.25 * (logdet_x + logdet_y)
+
+    return term_mean + term_cov
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0

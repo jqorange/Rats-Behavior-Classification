@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from .dilated_conv import DilatedConvEncoder
 from .domain_adapter import DomainAdapter
 
@@ -14,9 +13,9 @@ def check_nan(tensor: torch.Tensor, name: str):
 
 class Encoder(nn.Module):
     """
-    Adapter -> TCN -> (two heads)
-      - head_self : predict representation in *own* modality space
-      - head_cross: predict representation in the *other* modality space
+    Adapter -> TCN -> head_cross
+      - z_self  : direct TCN output (no MLP)
+      - z_cross : prediction in the *other* modality space via MLP
     NOTE: No self-attention here per requirement.
     """
     def __init__(self, N_feat, d_model=64, depth=3, dropout=0.1,
@@ -34,7 +33,7 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm_tcn = nn.LayerNorm(d_model)
 
-        # Two MLP heads
+        # MLP head for cross-modal prediction only
         def make_head():
             return nn.Sequential(
                 nn.Linear(d_model, d_model),
@@ -42,9 +41,7 @@ class Encoder(nn.Module):
                 nn.Dropout(dropout),
                 nn.Linear(d_model, d_model)
             )
-        self.head_self  = make_head()
         self.head_cross = make_head()
-        self.norm_self  = nn.LayerNorm(d_model)
         self.norm_cross = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, session_idx: torch.Tensor | None = None, mask=None):
@@ -78,10 +75,10 @@ class Encoder(nn.Module):
         h = self.norm_tcn(h + self.dropout(h_tcn))               # residual keep-current-frame info
         check_nan(h, "after norm_tcn")
 
-        # 4) Two heads (no self-attention)
-        z_self  = self.norm_self(self.head_self(h))              # [B, T, D]
-        z_cross = self.norm_cross(self.head_cross(h))            # [B, T, D]
-        check_nan(z_self,  "z_self")
+        # 4) Outputs
+        z_self = h                                              # [B, T, D]
+        z_cross = self.norm_cross(self.head_cross(h.detach()))  # [B, T, D]
+        check_nan(z_self, "z_self")
         check_nan(z_cross, "z_cross")
 
         return z_self, z_cross
