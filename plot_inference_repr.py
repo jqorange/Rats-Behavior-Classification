@@ -114,25 +114,28 @@ def main(args: argparse.Namespace) -> None:
             continue
         data = torch.load(rep_file)
         reps = data["features"].numpy()
+        centers = np.array(data.get("centers", np.arange(len(reps))))
 
         label_file = os.path.join("predictions", f"{sess}_pred_t.csv")
         if os.path.exists(label_file):
-            labels = pd.read_csv(label_file)[LABEL_COLUMNS].to_numpy()
-            min_len = min(len(labels), len(reps))
-            labels = labels[:min_len]
-            reps = reps[:min_len]
+            labels_all = pd.read_csv(label_file)[LABEL_COLUMNS].to_numpy()
+
+            # Align labels with representation centers
+            mask = centers < len(labels_all)
+            centers = centers[mask]
+            reps = reps[mask]
+            labels = labels_all[centers]
 
             if args.if_split and sess in label_ranges:
-                indices = []
+                pos = []
                 for start, end in label_ranges[sess]:
-                    start = max(0, start)
-                    end = min(len(labels), end)
-                    indices.extend(range(start, end))
-                if not indices:
+                    idx = np.where((centers >= start) & (centers < end))[0]
+                    pos.extend(idx.tolist())
+                if not pos:
                     print(f"[WARN] No labeled range for session {sess}")
                     continue
-                split_start = int(0.8 * len(indices))
-                sel = indices[split_start:]
+                split_start = int(0.8 * len(pos))
+                sel = pos[split_start:]
                 labels = labels[sel]
                 reps = reps[sel]
 
