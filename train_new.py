@@ -95,6 +95,34 @@ class ThreeStageTrainer:
             "loss_l2": loss_l2.detach(),
         }
 
+    def _step_align(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """仅计算对齐损失（loss_cs + loss_l2），不需要标签。"""
+        imu = self._sanitize_inplace(batch["imu"].to(self.device))
+        dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
+        session_idx = batch["session_idx"].to(self.device)
+
+        scale = torch.empty(imu.size(0), 1, 1, device=imu.device).uniform_(0.8, 1.2)
+        imu = imu * scale
+        dlc = dlc * scale
+
+        with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
+            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
+            jitter_std = 0.01
+            emb = emb + torch.randn_like(emb) * jitter_std
+            loss_cs = (
+                gaussian_cs_divergence(A_to_B, B_self.detach())
+                + gaussian_cs_divergence(B_to_A, A_self.detach())
+            )
+            loss_l2 = (
+                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
+                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
+            )
+            loss = loss_cs + loss_l2
+        return loss, {
+            "loss_cs": loss_cs.detach(),
+            "loss_l2": loss_l2.detach(),
+        }
+
     def _step_sup_stage2(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
         dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
@@ -208,7 +236,7 @@ class ThreeStageTrainer:
                 )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """冻结编码器：先无监督（不混 session），再有监督（混 session）。"""
+        """冻结编码器：先对齐损失（不混 session），再有监督（混 session）。"""
         # Freeze encoder + cross-attn etc., only train a new projection head
         # 构建新的 session-adapt projector（与 Stage1 不同）
         self.model.projection = DomainAdapter(self.d_model, self.d_model, num_sessions=self.num_sessions, dropout=0.1).to(self.device)
@@ -228,8 +256,8 @@ class ThreeStageTrainer:
                 seed=1234 + ep,
                 use_unlabeled=True,
             )
-            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
-            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
+            it_align = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
+            losses_align = self._run_epoch(it_align, self._step_align)
 
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_sup",
@@ -241,9 +269,9 @@ class ThreeStageTrainer:
             )
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
             losses_sup = self._run_epoch(it_sup, self._step_sup_stage2)
-            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
+            combined = {f"align_{k}": v for k, v in losses_align.items()}
             combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
-            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
+            total = combined.get("align_total", 0.0) + combined.get("sup_total", 0.0)
             self.total_epochs += 1
             print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
             if self.total_epochs % save_gap == 0:
@@ -257,7 +285,7 @@ class ThreeStageTrainer:
                 )
 
     def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """联训：有监督 + 无监督都在混 session 的 batch 上进行。"""
+        """联训：对齐损失 + 有监督都在混 session 的 batch 上进行。"""
         for p in self.model.parameters():
             p.requires_grad = True
         self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
@@ -272,8 +300,8 @@ class ThreeStageTrainer:
                 seed=5678 + ep,
                 use_unlabeled=True,
             )
-            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=True)
-            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
+            it_align = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=True)
+            losses_align = self._run_epoch(it_align, self._step_align)
 
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_sup",
@@ -287,9 +315,9 @@ class ThreeStageTrainer:
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
             losses_sup = self._run_epoch(it_sup, self._step_sup)
 
-            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
+            combined = {f"align_{k}": v for k, v in losses_align.items()}
             combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
-            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
+            total = combined.get("align_total", 0.0) + combined.get("sup_total", 0.0)
             self.total_epochs += 1
             print(f"[Stage3][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
             if self.total_epochs % save_gap == 0:
