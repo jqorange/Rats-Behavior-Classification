@@ -27,6 +27,23 @@ LABEL_COLUMNS = [
 ]
 
 
+def load_label_ranges(results_txt_path: str):
+    """Load labeled index ranges from results.txt."""
+    session_ranges = {}
+    with open(results_txt_path, "r") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            parts = line.strip().split("\t")
+            csv_path, range_str = parts[0], parts[1]
+            session_name = os.path.basename(csv_path).replace("label_", "").replace(
+                ".csv", ""
+            )
+            ranges = eval(range_str)
+            session_ranges[session_name] = ranges
+    return session_ranges
+
+
 def compute_cluster_metrics(data_pca, labels):
     """Compute clustering quality metrics for labeled data."""
     results = {}
@@ -84,6 +101,12 @@ def main(args: argparse.Namespace) -> None:
     rep_list = []
     label_list = []
 
+    label_ranges = {}
+    if args.if_split:
+        label_ranges = load_label_ranges(
+            os.path.join(args.data_path, "labels", "results.txt")
+        )
+
     for sess in args.sessions:
         rep_file = os.path.join(args.rep_dir, f"{sess}.pt")
         if not os.path.exists(rep_file):
@@ -91,16 +114,28 @@ def main(args: argparse.Namespace) -> None:
             continue
         data = torch.load(rep_file)
         reps = data["features"].numpy()
-        centres = np.asarray(data.get("centers", []), dtype=int)
 
         label_file = os.path.join("predictions", f"{sess}_pred_t.csv")
         if os.path.exists(label_file):
-            labels_all = pd.read_csv(label_file)[LABEL_COLUMNS].to_numpy()
-            if len(centres) != len(reps):
-                print(f"[WARN] centres length mismatch for session {sess}")
-            sel_idx = centres if len(centres) else np.arange(len(reps))
-            sel_idx = sel_idx[: len(reps)]
-            labels = labels_all[sel_idx]
+            labels = pd.read_csv(label_file)[LABEL_COLUMNS].to_numpy()
+            min_len = min(len(labels), len(reps))
+            labels = labels[:min_len]
+            reps = reps[:min_len]
+
+            if args.if_split and sess in label_ranges:
+                indices = []
+                for start, end in label_ranges[sess]:
+                    start = max(0, start)
+                    end = min(len(labels), end)
+                    indices.extend(range(start, end))
+                if not indices:
+                    print(f"[WARN] No labeled range for session {sess}")
+                    continue
+                split_start = int(0.8 * len(indices))
+                sel = indices[split_start:]
+                labels = labels[sel]
+                reps = reps[sel]
+
             label_list.append(labels)
         rep_list.append(reps)
 
@@ -188,9 +223,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Plot inferred representations with optional evaluation"
     )
-    parser.add_argument("--sessions", nargs="+", required=True, help="Session names")
+    parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_new", help="Base data path")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor"], help="Session names")
     parser.add_argument(
         "--rep_dir", default="representations", help="Directory of .pt representation files"
+    )
+    parser.add_argument(
+        "--if_split", default=False, help="Use last 20% of labeled ranges"
     )
     args = parser.parse_args()
     main(args)
