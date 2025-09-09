@@ -3,6 +3,45 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 from utils.tools import take_per_row
+
+
+def gaussian_cs_divergence(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Closed-form Cauchy-Schwarz divergence under Gaussian approximation.
+
+    Args:
+        x, y: tensors of shape ``[B, T, D]`` representing two sets of features.
+        eps: small value added to covariances for numerical stability.
+
+    Returns:
+        Scalar tensor representing the divergence.
+    """
+
+    B, T, D = x.shape
+    x_flat = x.reshape(-1, D)
+    y_flat = y.reshape(-1, D)
+
+    mu_x = x_flat.mean(dim=0)
+    mu_y = y_flat.mean(dim=0)
+
+    xc = x_flat - mu_x
+    yc = y_flat - mu_y
+
+    cov_x = (xc.T @ xc) / (x_flat.size(0) - 1)
+    cov_y = (yc.T @ yc) / (y_flat.size(0) - 1)
+
+    eye = torch.eye(D, device=x.device)
+    cov_x = cov_x + eps * eye
+    cov_y = cov_y + eps * eye
+
+    cov_mean = 0.5 * (cov_x + cov_y)
+
+    diff = (mu_x - mu_y).unsqueeze(0)  # 1 x D
+    inv_cov = torch.linalg.pinv(cov_mean)
+    term_mean = 0.25 * (diff @ inv_cov @ diff.t()).squeeze()
+
+    term_cov = 0.5 * torch.logdet(cov_mean) - 0.25 * torch.logdet(cov_x) - 0.25 * torch.logdet(cov_y)
+
+    return term_mean + term_cov
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0
