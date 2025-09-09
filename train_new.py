@@ -150,7 +150,7 @@ class ThreeStageTrainer:
         )
         return stage
 
-    def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
+    def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """无监督学习：每个 batch 内不混 session（by_session），每组统一 T。"""
         for p in self.model.parameters():
             p.requires_grad = True
@@ -170,7 +170,7 @@ class ThreeStageTrainer:
             it = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=False)
             self._run_epoch(it, self._step_unsup)
             self.total_epochs += 1
-            if self.total_epochs % 5 == 0:
+            if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
                     self.proj,
@@ -180,7 +180,7 @@ class ThreeStageTrainer:
                     path=os.path.join("checkpoints", f"stage1_epoch{self.total_epochs}.pt"),
                 )
 
-    def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
+    def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """冻结编码器：先无监督（不混 session），再有监督（混 session）。"""
         for p in self.model.parameters():
             p.requires_grad = False
@@ -202,7 +202,7 @@ class ThreeStageTrainer:
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, mix=True)
             self._run_epoch(it_sup, self._step_sup_stage2)
             self.total_epochs += 1
-            if self.total_epochs % 5 == 0:
+            if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
                     self.proj,
@@ -212,7 +212,7 @@ class ThreeStageTrainer:
                     path=os.path.join("checkpoints", f"stage2_epoch{self.total_epochs}.pt"),
                 )
 
-    def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0) -> None:
+    def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """联训：有监督 + 无监督都在混 session 的 batch 上进行。"""
         for p in self.model.parameters():
             p.requires_grad = True
@@ -237,7 +237,7 @@ class ThreeStageTrainer:
                 return self._step_sup(b) + self._step_unsup(b)
             self._run_epoch(it, step_joint)
             self.total_epochs += 1
-            if self.total_epochs % 5 == 0:
+            if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,
                     self.proj,
@@ -270,13 +270,13 @@ def main() -> None:
     n_workers_preproc = 1
 
     print(">>> Stage 1 (unsupervised)...")
-    trainer.stage1(train_ds, batch_size, epochs=10, n_workers_preproc=n_workers_preproc)
+    trainer.stage1(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
 
     print(">>> Stage 2 (frozen encoder: unsup + sup)...")
-    trainer.stage2(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc)
+    trainer.stage2(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
 
     print(">>> Stage 3 (joint training)...")
-    trainer.stage3(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc)
+    trainer.stage3(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
 
 
 if __name__ == "__main__":
