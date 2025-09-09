@@ -78,8 +78,14 @@ def run_inference(
     out_dir: str = 'representations',
     batch_size: int = 128,
     stride: int = 1,             # <== 新增：滑动步长，默认逐帧
+    fuse_mode: str = 'both',     # 'imu', 'dlc', or 'both'
 ) -> None:
-    """Generate representations for sessions using a saved checkpoint."""
+    """Generate representations for sessions using a saved checkpoint.
+
+    ``fuse_mode`` controls which modalities contribute to cross attention:
+    ``'imu'`` uses only IMU features (A with A_to_B), ``'dlc'`` uses only DLC
+    features (B with B_to_A) and ``'both'`` fuses IMU with DLC (A with B).
+    """
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
     os.makedirs(out_dir, exist_ok=True)
 
@@ -146,7 +152,7 @@ def run_inference(
                 dlc_win_b = _extract_windows(dlc, centres_b, T).to(device, non_blocking=True)
                 sess_idx_b = torch.full((len(centres_b),), index, dtype=torch.long, device=device)
 
-                feat_b, *_ = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b)
+                feat_b, *_ = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
                 # 取中心帧特征
                 feat_b = feat_b[:, T // 2].detach().cpu()
                 feats_T_batches.append(feat_b)
@@ -182,6 +188,8 @@ def main() -> None:
     p.add_argument('--out_dir', default='representations')
     p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')  # <== 新增
     p.add_argument('--stride', type=int, default=1, help='Sliding stride for centers (1 = per frame)')
+    p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='both',
+                   help='Cross-attention mode during inference')
     args = p.parse_args()
 
     run_inference(
@@ -195,6 +203,7 @@ def main() -> None:
         out_dir=args.out_dir,
         batch_size=args.batch_size,   # <== 传入
         stride=args.stride,  # <== 新增
+        fuse_mode=args.fuse_mode,
     )
 
 
