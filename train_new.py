@@ -246,7 +246,7 @@ class ThreeStageTrainer:
 
 def main() -> None:
     data_root = r"D:\Jiaqi\Datasets\Rats\TrainData_new"
-    sessions = ["F3D5_outdoor", "F3D6_outdoor"]
+    sessions = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_2"]
     batch_size = 512
     session_ranges = None
 
@@ -266,7 +266,7 @@ def main() -> None:
     n_workers_preproc = 1
 
     print(">>> Stage 1 (unsupervised)...")
-    trainer.stage1(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)
+    trainer.stage1(train_ds, batch_size, epochs=10000, n_workers_preproc=n_workers_preproc, save_gap=1)
 
     print(">>> Stage 2 (frozen encoder: unsup + sup)...")
     trainer.stage2(train_ds, batch_size, epochs=1, n_workers_preproc=n_workers_preproc, save_gap=1)

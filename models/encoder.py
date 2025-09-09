@@ -19,7 +19,7 @@ class Encoder(nn.Module):
       - head_cross: predict representation in the *other* modality space
     NOTE: No self-attention here per requirement.
     """
-    def __init__(self, N_feat, d_model=64, depth=10, dropout=0.1,
+    def __init__(self, N_feat, d_model=64, depth=3, dropout=0.1,
                  num_sessions: int = 0):
         super().__init__()
         self.d_model = d_model

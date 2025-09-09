@@ -101,38 +101,35 @@ def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8, return_score=Fal
 
     return loss
 
-def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8):
-    """
-    z: (B, T, D) - time series embeddings
-    y: (B, N)    - multi-label binary tags
-    This version applies max pooling across time to reduce computation.
-    """
+def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
     B, T, D = z.shape
-
-    # === Max Pooling across time dimension ===
-    z = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)  # (B, D)
+    z = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)  # (B,D)
     z = F.normalize(z, dim=-1)
+    y = y.float()
 
-    y = y.float()  # (B, N)
+    # Cosine similarity
+    sim = torch.matmul(z, z.T) / temperature
+    sim.fill_diagonal_(-1e4)
 
-    # Compute cosine similarity
-    sim = torch.matmul(z, z.T) / temperature  # (B, B)
+    # Jaccard similarity
+    inter = y @ y.T
+    y_sum = y.sum(-1, keepdim=True)
+    union = y_sum + y_sum.T - inter
+    jaccard = inter / (union + eps)
+    jaccard.fill_diagonal_(0)
 
-    # Remove diagonal (self-similarity)
-    logits_mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
-    sim = sim[logits_mask].view(B, B - 1)
+    # Top-K neighbors only
+    topk_vals, topk_idx = torch.topk(jaccard, k=min(topk, B-1), dim=1)  # (B,topk)
 
-    # Compute Jaccard similarity between labels
-    inter = torch.matmul(y, y.T)  # (B, B)
-    union = (y.unsqueeze(1) + y.unsqueeze(0)).clamp(max=1).sum(-1)
-    jaccard = inter / (union + eps)  # (B, B)
+    # Gather similarity & log-probs
+    log_prob = F.log_softmax(sim, dim=1)  # (B,B)
+    log_prob_topk = torch.gather(log_prob, 1, topk_idx)  # (B,topk)
 
-    jaccard_masked = jaccard[logits_mask].view(B, B - 1)
-    weights = jaccard_masked / (jaccard_masked.sum(dim=1, keepdim=True) + eps)
+    # Normalize weights
+    weights = topk_vals / (topk_vals.sum(dim=1, keepdim=True) + eps)
 
-    log_prob = F.log_softmax(sim, dim=1)
-    loss = -(weights * log_prob).sum(dim=1).mean()
-
+    # Weighted contrastive loss
+    loss = -(weights * log_prob_topk).sum(dim=1).mean()
     return loss
 
 
