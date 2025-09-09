@@ -116,7 +116,7 @@ def main(args: argparse.Namespace) -> None:
         reps = data["features"].numpy()
         centers = np.array(data.get("centers", np.arange(len(reps))))
 
-        label_file = os.path.join("predictions", f"{sess}_pred_t.csv")
+        label_file = os.path.join(args.data_path, "labels", sess, f"label_{sess}.csv")
         if os.path.exists(label_file):
             labels_all = pd.read_csv(label_file)[LABEL_COLUMNS].to_numpy()
 
