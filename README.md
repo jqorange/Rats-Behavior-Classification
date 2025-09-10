@@ -11,10 +11,9 @@ Web Link: [https://jqorange.github.io/Rats_Behavior_Classification/](https://jqo
 
 Two encoders process IMU and DLC time-series features. Each encoder consists of:
 
-1. **Input projection** – a linear layer mapping raw features to `d_model` dimensions.  
-2. **Dilated Conv Block** – stacked dilated convolutions (`models/dilated_conv.py`) to capture local patterns.  
-3. **Transformer Encoder** – models long-range dependencies.  
-4. **Global projection** – optional linear layer after average pooling for a fixed-sized representation.
+1. **Domain adapter** – session-aware projection mapping raw features to `d_model` dimensions.
+2. **Dilated Conv Block** – stacked dilated convolutions (`models/dilated_conv.py`) to capture local patterns.
+3. **GRU alignment head** – a small GRU predicting the representation in the other modality.
 
 `EncoderFusion` applies multi-head cross attention to combine the two embeddings, then uses gated residual connections to produce the final sequence representation.
 
