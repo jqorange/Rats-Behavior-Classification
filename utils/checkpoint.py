@@ -57,8 +57,12 @@ def load_checkpoint(
         tuple[int, int]: (total_epochs, stage)
     """
     ckpt = torch.load(path, map_location="cpu")
-    model.load_state_dict(ckpt.get("model_state", {}))
-    projector.load_state_dict(ckpt.get("projector_state", {}))
+    missing, unexpected = model.load_state_dict(ckpt.get("model_state", {}), strict=False)
+    if missing or unexpected:
+        print(f"[load_checkpoint] missing_keys: {missing}, unexpected_keys: {unexpected}")
+    miss_p, unexp_p = projector.load_state_dict(ckpt.get("projector_state", {}), strict=False)
+    if miss_p or unexp_p:
+        print(f"[load_checkpoint] projector missing_keys: {miss_p}, unexpected_keys: {unexp_p}")
     if optimizer is not None and "optimizer_state" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state"])
 

@@ -14,8 +14,8 @@ def check_nan(tensor: torch.Tensor, name: str):
 class Encoder(nn.Module):
     """
     Adapter -> TCN -> head_cross
-      - z_self  : direct TCN output (no MLP)
-      - z_cross : prediction in the *other* modality space via MLP
+      - z_self  : direct TCN output
+      - z_cross : prediction in the *other* modality space via a small GRU
     NOTE: No self-attention here per requirement.
     """
     def __init__(self, N_feat, d_model=64, depth=3, dropout=0.1,
@@ -33,15 +33,8 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm_tcn = nn.LayerNorm(d_model)
 
-        # MLP head for cross-modal prediction only
-        def make_head():
-            return nn.Sequential(
-                nn.Linear(d_model, d_model),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_model, d_model)
-            )
-        self.head_cross = make_head()
+        # GRU head for cross-modal prediction only
+        self.head_cross = nn.GRU(d_model, d_model, batch_first=True)
         self.norm_cross = nn.LayerNorm(d_model)
 
     def forward(self, x: torch.Tensor, session_idx: torch.Tensor | None = None, mask=None):
@@ -77,7 +70,8 @@ class Encoder(nn.Module):
 
         # 4) Outputs
         z_self = h                                              # [B, T, D]
-        z_cross = self.norm_cross(self.head_cross(h.detach()))  # [B, T, D]
+        z_cross, _ = self.head_cross(h.detach())
+        z_cross = self.norm_cross(z_cross)                      # [B, T, D]
         check_nan(z_self, "z_self")
         check_nan(z_cross, "z_cross")
 
