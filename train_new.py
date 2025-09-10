@@ -63,7 +63,11 @@ class ThreeStageTrainer:
         B, T, _ = imu.shape
         if T <= 5:
             zero = torch.tensor(0.0, device=imu.device)
-            return zero, {'loss_contrast': zero.detach()}
+            return zero, {
+                'loss_contrast': zero.detach(),
+                'loss_cs': zero.detach(),
+                'loss_l2': zero.detach(),
+            }
 
         min_crop = 2 ** (self.temporal_unit + 1)
         try:
@@ -108,8 +112,12 @@ class ThreeStageTrainer:
                 raise ValueError(f'NaN detected in {name}')
 
         with torch.amp.autocast('cuda', enabled=(self.device == 'cuda')):
-            emb1, *_ = self.model(imu_crop1, dlc_crop1, session_idx=session_idx)
+            emb1, A_self, B_self, A_to_B, B_to_A = self.model(imu_crop1, dlc_crop1, session_idx=session_idx)
             emb1 = emb1[:, -crop_l:]
+            A_self = A_self[:, -crop_l:]
+            B_self = B_self[:, -crop_l:]
+            A_to_B = A_to_B[:, -crop_l:]
+            B_to_A = B_to_A[:, -crop_l:]
             emb2, *_ = self.model(imu_crop2, dlc_crop2, session_idx=session_idx)
             emb2 = emb2[:, :crop_l]
 
@@ -120,10 +128,23 @@ class ThreeStageTrainer:
             emb2 = F.normalize(emb2, dim=-1)
 
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
+            loss_cs = (
+                gaussian_cs_divergence(A_to_B, B_self.detach())
+                + gaussian_cs_divergence(B_to_A, A_self.detach())
+            )
+            loss_l2 = (
+                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
+                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
+            )
+            loss = loss_contrast + loss_cs + loss_l2
             if loss_contrast.item() > 10:
                 print(f'⚠️ [WARNING] Contrastive loss unusually high: {loss_contrast.item():.4f}')
 
-        return loss_contrast, {'loss_contrast': loss_contrast.detach()}
+        return loss, {
+            'loss_contrast': loss_contrast.detach(),
+            'loss_cs': loss_cs.detach(),
+            'loss_l2': loss_l2.detach(),
+        }
 
     def _step_align(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """仅计算对齐损失（loss_cs + loss_l2），不需要标签。"""
@@ -238,7 +259,8 @@ class ThreeStageTrainer:
         return stage
 
     def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """无监督学习：每个 batch 内不混 session（by_session），每组统一 T。"""
+        """无监督学习：每个 batch 内不混 session（by_session），每组统一 T，
+        包含对比学习与对齐损失（loss_cs + loss_l2）。"""
         for p in self.model.parameters():
             p.requires_grad = True
         self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
