@@ -150,7 +150,7 @@ def preprocess_dataset(
     store_dtype: str = "float16",              # "float16" / "float32"
     label_dtype: str = "uint8",                # "uint8" / "float32"
     mask_dtype: str = "uint8",    # "uint8" / "bool"
-    window_sizes: Sequence[int] = (16, 32, 64, 128, 256, 512),  # <== 新增
+    window_sizes: Sequence[int] = (16, 32, 64, 128),  # <== 新增
     preproc_shard_batches: int = 8,            # 每次处理/写入的 batch 数
     use_unlabeled: bool = False,
 ) -> None:

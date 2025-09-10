@@ -67,8 +67,8 @@ class RatsWindowDataset(Dataset):
         self.num_labels = 0
 
         for session in self.sessions:
-            imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features.csv")
-            dlc_file = os.path.join(root, "DLC", session, f"final_filtered_{session}_50hz.csv")
+            imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features_madnorm.csv")
+            dlc_file = os.path.join(root, "DLC", session, f"final_filtered_{session}_50hz_madnorm.csv")
             label_file = os.path.join(root, "labels", session, f"label_{session}.csv")
 
             imu_df = pd.read_csv(imu_file, nrows=self.max_len_per_session)

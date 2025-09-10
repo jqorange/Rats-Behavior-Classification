@@ -21,8 +21,8 @@ def latest_checkpoint(ckpt_dir: str) -> str:
 
 def _load_session_arrays(root: str, session: str):
     """Load IMU/DLC arrays and labels for one session."""
-    imu_file = os.path.join(root, 'IMU', session, f'{session}_IMU_features.csv')
-    dlc_file = os.path.join(root, 'DLC', session, f'final_filtered_{session}_50hz.csv')
+    imu_file = os.path.join(root, 'IMU', session, f'{session}_IMU_features_madnorm.csv')
+    dlc_file = os.path.join(root, 'DLC', session, f'final_filtered_{session}_50hz_madnorm.csv')
     label_file = os.path.join(root, 'labels', session, f'label_{session}.csv')
 
     imu_df = pd.read_csv(imu_file)
@@ -175,7 +175,7 @@ def run_inference(
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
     # 修正 required 误用；设置一个默认路径，仍可通过 CLI 覆盖
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch5.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch52.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',
