@@ -118,13 +118,9 @@ class RatsWindowDataset(Dataset):
                 lab_tensor = torch.from_numpy(lab)
                 self.samples.append((session, lab_tensor, int(centre)))
 
-            # 生成无监督样本：覆盖当前 split 的所有帧
+            # 生成无监督样本：覆盖所有帧
             n_total = min_len
-            n_train_total = int(n_total * 0.8)
-            if split == "train":
-                unsup_start, unsup_end = 0, n_train_total
-            else:
-                unsup_start, unsup_end = n_train_total, n_total
+            unsup_start, unsup_end = 0, n_total
             # 可选限制范围也作用于无监督样本
             if session in self.session_ranges:
                 start, end = self.session_ranges[session]
