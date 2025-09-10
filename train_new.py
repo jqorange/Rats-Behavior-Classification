@@ -44,7 +44,7 @@ class ThreeStageTrainer:
             # 如果你的 EncoderFusion/encoder 支持传入概率参数，建议同时传：
             # drop_prob=0.1,
         ).to(self.device)
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-4)
         self.total_epochs = 0
 
         # ✅ 新 API

@@ -119,7 +119,7 @@ def run_inference(
             index = 0
 
     if window == 'multi':
-        Ts = [16, 32, 64, 128, 256, 512]
+        Ts = [16, 32, 64, 128]
         base_stride = stride
     else:
         Ts = [64]
@@ -181,20 +181,20 @@ def run_inference(
 
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch10.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch13.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',
                    default=["F3D5_outdoor"],
                    help='Session names')
     p.add_argument('--mode', choices=['full', 'labeled'], default='full')
-    p.add_argument('--window', choices=['64', 'multi'], default='64')
+    p.add_argument('--window', choices=['64', 'multi'], default='multi')
     p.add_argument('--index', type=int, default=0, help='Projector index for stage1 model')
     p.add_argument('--device', default="cuda")
     p.add_argument('--out_dir', default='representations')
     p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')
     p.add_argument('--stride', type=int, default=1, help='Sliding stride for centers (1 = per frame)')
-    p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='both',
+    p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='imu',
                    help='Cross-attention mode during inference')
     args = p.parse_args()
 

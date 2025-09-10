@@ -98,8 +98,8 @@ class EncoderFusion(nn.Module):
         # === Build candidate sets ===
         # Query candidates (B-space):  {B_self, A_to_B}
         # Key/Value candidates (A-space): {A_self, B_to_A}
-        kv_candidates  = (A_self, B_to_A)
-        q_candidates = (B_self, A_to_B)
+        kv_candidates  = (A_self, A_self)
+        q_candidates = (B_self, B_self)
 
         # === Select cross-attention pair ===
         if attn_mode is None:
