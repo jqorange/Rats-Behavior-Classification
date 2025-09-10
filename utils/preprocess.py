@@ -1,7 +1,7 @@
 # utils/preprocess.py
 import os
 import random
-from typing import Sequence, Dict, List, Optional, Tuple
+from typing import Sequence, Dict, List, Tuple
 from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,43 +16,6 @@ def _split_into_groups(indices: List[int], group_size: int) -> List[List[int]]:
     """把索引按 batch_size 切成若干组（最后不满的一组丢弃）"""
     n_full = len(indices) // group_size
     return [indices[i*group_size:(i+1)*group_size] for i in range(n_full)]
-
-
-@torch.no_grad()
-def _mad_from_rows(
-    x: torch.Tensor,
-    *,
-    eps: float = 1e-8,
-    scale_to_std: bool = True,
-    sample_rows: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    计算每列 median & MAD（可抽样加速）
-    x: (L, F)
-    return: (median(F,), mad_scaled(F,))
-    """
-    x = torch.nan_to_num(x.float())
-    L = x.shape[0]
-    if sample_rows is not None and L > sample_rows:
-        # 随机抽样到 sample_rows 行（在 device 上完成，不额外复制）
-        idx = torch.randint(0, L, (sample_rows,), device=x.device)
-        x_s = x.index_select(0, idx)
-    else:
-        x_s = x
-
-    med = x_s.median(dim=0).values                     # (F,)
-    mad = (x_s - med).abs().median(dim=0).values       # (F,)
-    if scale_to_std:
-        mad = mad * 1.4826
-    mad = torch.clamp(mad, min=eps)
-    return med, mad
-
-
-@torch.no_grad()
-def _apply_mad_norm(x: torch.Tensor, med: torch.Tensor, mad: torch.Tensor) -> torch.Tensor:
-    """按列 MAD 归一化： (x - med) / mad"""
-    return torch.nan_to_num((x.float() - med) / mad)
-
 
 @torch.no_grad()
 def _batch_crop_rows(data_rows: torch.Tensor, starts: torch.Tensor, T: int):
@@ -73,31 +36,6 @@ def _batch_crop_rows(data_rows: torch.Tensor, starts: torch.Tensor, T: int):
     rows = torch.index_select(data_rows, 0, idx.view(-1))
     windows = rows.view(B, T, F) * mask.unsqueeze(-1)
     return windows, mask
-
-
-def _save_scaler(cache_path: str, med_imu: torch.Tensor, mad_imu: torch.Tensor,
-                 med_dlc: torch.Tensor, mad_dlc: torch.Tensor):
-    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-    np.savez(
-        cache_path,
-        med_imu=med_imu.detach().cpu().numpy(),
-        mad_imu=mad_imu.detach().cpu().numpy(),
-        med_dlc=med_dlc.detach().cpu().numpy(),
-        mad_dlc=mad_dlc.detach().cpu().numpy(),
-        version=1,
-    )
-
-
-def _load_scaler(cache_path: str, device: str) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
-    if not os.path.exists(cache_path):
-        return None
-    arr = np.load(cache_path)
-    med_imu = torch.from_numpy(arr["med_imu"]).to(device)
-    mad_imu = torch.from_numpy(arr["mad_imu"]).to(device)
-    med_dlc = torch.from_numpy(arr["med_dlc"]).to(device)
-    mad_dlc = torch.from_numpy(arr["mad_dlc"]).to(device)
-    return med_imu, mad_imu, med_dlc, mad_dlc
-
 
 def _np_dtype_from_str(name: str):
     name = name.lower()
@@ -121,16 +59,12 @@ def _build_session_file(
     out_dir: str,
     device: str,
     compress: bool,
-    mad_scale_to_std: bool,
-    mad_cache_dir: str,
-    use_mad_cache: bool,
-    mad_sample_rows: Optional[int],
     store_dtype: str,
     label_dtype: str,
     mask_dtype: str,
     preproc_shard_batches: int,
 ):
-    """单个 session：MAD 归一化（可缓存/抽样）+ 分块向量化裁剪 + 分块写 HDF5。"""
+    """单个 session：分块向量化裁剪 + 分块写 HDF5。"""
     if not groups:
         return
 
@@ -158,22 +92,9 @@ def _build_session_file(
             }
             grp.attrs["num_batches"] = n_batches
 
-        # ---- 准备序列并做 MAD 归一化（优先用缓存）----
+        # ---- 准备序列（不做归一化） ----
         imu_rows = dataset.data[session].imu.to(device)
         dlc_rows = dataset.data[session].dlc.to(device)
-
-        cache_path = os.path.join(mad_cache_dir, f"{session}_mad.npz")
-        scalers = _load_scaler(cache_path, device) if use_mad_cache else None
-        if scalers is None:
-            med_imu, mad_imu = _mad_from_rows(imu_rows, scale_to_std=mad_scale_to_std, sample_rows=mad_sample_rows)
-            med_dlc, mad_dlc = _mad_from_rows(dlc_rows, scale_to_std=mad_scale_to_std, sample_rows=mad_sample_rows)
-            if use_mad_cache:
-                _save_scaler(cache_path, med_imu, mad_imu, med_dlc, mad_dlc)
-        else:
-            med_imu, mad_imu, med_dlc, mad_dlc = scalers
-
-        imu_rows = _apply_mad_norm(imu_rows, med_imu, mad_imu)
-        dlc_rows = _apply_mad_norm(dlc_rows, med_dlc, mad_dlc)
 
         # ---- 按 T 分块裁剪写入，避免一次性占满内存 ----
         for T in count_T.keys():
@@ -226,10 +147,6 @@ def preprocess_dataset(
     device: str | None = None,          # "cuda" / "cpu"
     compress: bool = False,
     num_workers: int = 0,               # 按 session 并行
-    mad_scale_to_std: bool = True,
-    mad_cache_dir: str = "Dataset/scalers",
-    use_mad_cache: bool = True,
-    mad_sample_rows: Optional[int] = 200_000,   # None=全量精确；数值越小越快
     store_dtype: str = "float16",              # "float16" / "float32"
     label_dtype: str = "uint8",                # "uint8" / "float32"
     mask_dtype: str = "uint8",    # "uint8" / "bool"
@@ -238,7 +155,7 @@ def preprocess_dataset(
     use_unlabeled: bool = False,
 ) -> None:
     """
-    MAD 归一化（支持缓存/抽样） + 分块向量化裁剪写入（低峰值内存） + 按 session 并行
+    分块向量化裁剪写入（低峰值内存） + 按 session 并行
     """
     os.makedirs(out_dir, exist_ok=True)
     rng = random.Random(seed)
@@ -303,10 +220,6 @@ def preprocess_dataset(
                         out_dir,
                         device,
                         compress,
-                        mad_scale_to_std,
-                        mad_cache_dir,
-                        use_mad_cache,
-                        mad_sample_rows,
                         store_dtype,
                         label_dtype,
                         mask_dtype,
@@ -326,10 +239,6 @@ def preprocess_dataset(
                 out_dir,
                 device,
                 compress,
-                mad_scale_to_std,
-                mad_cache_dir,
-                use_mad_cache,
-                mad_sample_rows,
                 store_dtype,
                 label_dtype,
                 mask_dtype,
