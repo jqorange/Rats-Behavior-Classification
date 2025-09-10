@@ -11,6 +11,8 @@ import argparse
 from typing import Sequence, Dict
 
 import torch
+import torch.nn.functional as F
+import numpy as np
 from tqdm import tqdm
 
 from utils.window_dataset import RatsWindowDataset
@@ -24,6 +26,7 @@ from models.losses import (
 )
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from models.domain_adapter import DomainAdapter
+from utils.tools import take_per_row
 
 
 class ThreeStageTrainer:
@@ -46,54 +49,81 @@ class ThreeStageTrainer:
 
         # ✅ 新 API
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
+        self.temporal_unit = 3
 
     def _sanitize_inplace(self, t: torch.Tensor) -> torch.Tensor:
         # 把 NaN/Inf 变成 0，防止后续层炸掉
         return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
 
     def _step_unsup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        imu = self._sanitize_inplace(batch["imu"].to(self.device))
-        dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
-        session_idx = batch["session_idx"].to(self.device, dtype=torch.long)
+        imu = self._sanitize_inplace(batch['imu'].to(self.device))
+        dlc = self._sanitize_inplace(batch['dlc'].to(self.device))
+        session_idx = batch['session_idx'].to(self.device, dtype=torch.long)
 
-        def _crop_and_scale(x1: torch.Tensor, x2: torch.Tensor, ratio: float = 0.8):
-            """Randomly crop the same 80% window and apply random scaling."""
-            B, T, D1 = x1.shape
-            crop_len = max(int(T * ratio), 1)
-            start = torch.randint(0, T - crop_len + 1, (B,), device=x1.device)
-            idx = start[:, None] + torch.arange(crop_len, device=x1.device)[None, :]
-            idx = idx.unsqueeze(-1)
-            x1_crop = torch.gather(x1, 1, idx.expand(-1, -1, D1))
-            x2_crop = torch.gather(x2, 1, idx.expand(-1, -1, x2.size(2)))
-            scales = torch.empty(B, 1, 1, device=x1.device).uniform_(0.8, 1.2)
-            return x1_crop * scales, x2_crop * scales
+        B, T, _ = imu.shape
+        if T <= 5:
+            zero = torch.tensor(0.0, device=imu.device)
+            return zero, {'loss_contrast': zero.detach()}
 
-        with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
-            imu1, dlc1 = _crop_and_scale(imu, dlc)
-            imu2, dlc2 = _crop_and_scale(imu, dlc)
+        min_crop = 2 ** (self.temporal_unit + 1)
+        try:
+            crop_l = np.random.randint(low=min_crop, high=T + 1)
+            crop_left = np.random.randint(T - crop_l + 1)
+            crop_right = crop_left + crop_l
+            crop_eleft = np.random.randint(crop_left + 1)
+            crop_eright = np.random.randint(low=crop_right, high=T + 1)
+            crop_offset = torch.randint(
+                low=-crop_eleft,
+                high=T - crop_eright + 1,
+                size=(B,),
+                device=imu.device,
+            )
+        except Exception as e:
+            print(f'[ERROR] Crop param generation failed: T={T}, temporal_unit={self.temporal_unit}')
+            raise e
 
-            emb1, A_self, B_self, A_to_B, B_to_A = self.model(imu1, dlc1, session_idx=session_idx)
-            emb2, *_ = self.model(imu2, dlc2, session_idx=session_idx)
+        for i in range(B):
+            start1 = crop_offset[i].item() + crop_eleft
+            end1 = start1 + (crop_right - crop_eleft)
+            start2 = crop_offset[i].item() + crop_left
+            end2 = start2 + (crop_eright - crop_left)
+            if start1 < 0 or end1 > T or start2 < 0 or end2 > T:
+                print(f'❌ Invalid crop range! B={i} | T={T}')
+                print(f'→ crop_offset={crop_offset[i].item()}, eleft={crop_eleft}, right={crop_right}')
+                print(f'→ crop1 range: {start1}:{end1}, crop2 range: {start2}:{end2}')
+                raise ValueError('Invalid crop range detected.')
+
+        imu_crop1 = take_per_row(imu, crop_offset + crop_eleft, crop_right - crop_eleft)
+        dlc_crop1 = take_per_row(dlc, crop_offset + crop_eleft, crop_right - crop_eleft)
+        imu_crop2 = take_per_row(imu, crop_offset + crop_left, crop_eright - crop_left)
+        dlc_crop2 = take_per_row(dlc, crop_offset + crop_left, crop_eright - crop_left)
+
+        for name, crop in zip(
+            ['imu_crop1', 'dlc_crop1', 'imu_crop2', 'dlc_crop2'],
+            [imu_crop1, dlc_crop1, imu_crop2, dlc_crop2],
+        ):
+            if torch.isnan(crop).any():
+                print(f'❌ NaN detected in {name}')
+                print(f'→ Shape: {crop.shape}, Mean: {crop.mean().item()}, Std: {crop.std().item()}')
+                raise ValueError(f'NaN detected in {name}')
+
+        with torch.amp.autocast('cuda', enabled=(self.device == 'cuda')):
+            emb1, *_ = self.model(imu_crop1, dlc_crop1, session_idx=session_idx)
+            emb1 = emb1[:, -crop_l:]
+            emb2, *_ = self.model(imu_crop2, dlc_crop2, session_idx=session_idx)
+            emb2 = emb2[:, :crop_l]
 
             jitter_std = 0.01
             emb1 = emb1 + torch.randn_like(emb1) * jitter_std
             emb2 = emb2 + torch.randn_like(emb2) * jitter_std
+            emb1 = F.normalize(emb1, dim=-1)
+            emb2 = F.normalize(emb2, dim=-1)
 
-            loss_contrast = hierarchical_contrastive_loss(emb1, emb2)
-            loss_cs = (
-                gaussian_cs_divergence(A_to_B, B_self.detach())
-                + gaussian_cs_divergence(B_to_A, A_self.detach())
-            )
-            loss_l2 = (
-                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
-                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
-            )
-            loss = loss_contrast + loss_cs + loss_l2
-        return loss, {
-            "loss_contrast": loss_contrast.detach(),
-            "loss_cs": loss_cs.detach(),
-            "loss_l2": loss_l2.detach(),
-        }
+            loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
+            if loss_contrast.item() > 10:
+                print(f'⚠️ [WARNING] Contrastive loss unusually high: {loss_contrast.item():.4f}')
+
+        return loss_contrast, {'loss_contrast': loss_contrast.detach()}
 
     def _step_align(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """仅计算对齐损失（loss_cs + loss_l2），不需要标签。"""
