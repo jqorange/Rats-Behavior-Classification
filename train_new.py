@@ -30,7 +30,7 @@ from utils.tools import take_per_row
 
 
 class ThreeStageTrainer:
-    def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions: int, device: str | None = None) -> None:
+    def __init__(self, num_features_imu: int, num_features_dlc: int, num_sessions: int, device: str | None = None, *, stage_lrs: Dict[int, float] | None = None) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.num_sessions = num_sessions
         self.d_model = 64
@@ -44,12 +44,18 @@ class ThreeStageTrainer:
             # 如果你的 EncoderFusion/encoder 支持传入概率参数，建议同时传：
             # drop_prob=0.1,
         ).to(self.device)
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        self.stage_lrs = {1: 1e-3, 2: 1e-3, 3: 1e-3}
+        if stage_lrs:
+            self.stage_lrs.update(stage_lrs)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         self.total_epochs = 0
 
         # ✅ 新 API
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
         self.temporal_unit = 3
+
+    def set_stage_lr(self, stage: int, lr: float) -> None:
+        self.stage_lrs[stage] = lr
 
     def _sanitize_inplace(self, t: torch.Tensor) -> torch.Tensor:
         # 把 NaN/Inf 变成 0，防止后续层炸掉
@@ -263,7 +269,7 @@ class ThreeStageTrainer:
         包含对比学习与对齐损失（loss_cs + loss_l2）。"""
         for p in self.model.parameters():
             p.requires_grad = True
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         for ep in range(epochs):
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_unsup",
@@ -297,7 +303,7 @@ class ThreeStageTrainer:
             p.requires_grad = False
         for p in self.model.projection.parameters():
             p.requires_grad = True
-        self.opt = torch.optim.Adam(self.model.projection.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(self.model.projection.parameters(), lr=self.stage_lrs[2])
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -340,7 +346,7 @@ class ThreeStageTrainer:
         """联训：对齐损失 + 有监督都在混 session 的 batch 上进行。"""
         for p in self.model.parameters():
             p.requires_grad = True
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=1e-3)
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[3])
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -386,6 +392,9 @@ class ThreeStageTrainer:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume-epoch", type=int, default=0, help="Resume training from given epoch")
+    parser.add_argument("--lr-stage1", type=float, default=1e-3, help="Learning rate for stage 1")
+    parser.add_argument("--lr-stage2", type=float, default=1e-3, help="Learning rate for stage 2")
+    parser.add_argument("--lr-stage3", type=float, default=1e-3, help="Learning rate for stage 3")
     args = parser.parse_args()
 
     data_root = r"D:\Jiaqi\Datasets\Rats\TrainData_new"
@@ -403,7 +412,12 @@ def main() -> None:
     num_feat_dlc = train_ds.data[sessions[0]].dlc.shape[1]
     num_sessions = len(sessions)
 
-    trainer = ThreeStageTrainer(num_feat_imu, num_feat_dlc, num_sessions)
+    trainer = ThreeStageTrainer(
+        num_feat_imu,
+        num_feat_dlc,
+        num_sessions,
+        stage_lrs={1: args.lr_stage1, 2: args.lr_stage2, 3: args.lr_stage3},
+    )
 
     # 预处理多线程数：HDF5 写还是串行，线程只做裁剪与拼 batch
     n_workers_preproc = 1
