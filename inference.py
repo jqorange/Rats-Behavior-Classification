@@ -77,7 +77,7 @@ def run_inference(
     device: Optional[str] = None,
     out_dir: str = 'representations',
     batch_size: int = 128,
-    stride: int = 1,             # <== 新增：滑动步长，默认逐帧
+    stride: int = 1,             # 滑动步长，默认逐帧
     fuse_mode: str = 'both',     # 'imu', 'dlc', or 'both'
 ) -> None:
     """Generate representations for sessions using a saved checkpoint.
@@ -152,14 +152,21 @@ def run_inference(
                 dlc_win_b = _extract_windows(dlc, centres_b, T).to(device, non_blocking=True)
                 sess_idx_b = torch.full((len(centres_b),), index, dtype=torch.long, device=device)
 
-                feat_b, *_ = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
-                # 取中心帧特征
-                feat_b = feat_b[:, T // 2].detach().cpu()
+                # 前向得到时序表征 (B, T, D)
+                feat_seq_b, *_ = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
+
+                # ==== 关键修改：时间维做 max pooling 得到 (B, D) ====
+                # 原来是取中心帧：feat_b = feat_seq_b[:, T // 2]
+                # 现在改为：沿时间维度做最大池化
+                feat_b = torch.amax(feat_seq_b, dim=1).detach().cpu()
+                # ===============================================
+
                 feats_T_batches.append(feat_b)
 
                 # 及时释放显存
-                del imu_win_b, dlc_win_b, sess_idx_b
-                torch.cuda.empty_cache() if device.startswith('cuda') else None
+                del imu_win_b, dlc_win_b, sess_idx_b, feat_seq_b, feat_b
+                if isinstance(device, str) and device.startswith('cuda'):
+                    torch.cuda.empty_cache()
 
             # 拼回完整序列在该 T 下的特征
             feats_T = torch.cat(feats_T_batches, dim=0)  # (N, d_model)
@@ -174,8 +181,7 @@ def run_inference(
 
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
-    # 修正 required 误用；设置一个默认路径，仍可通过 CLI 覆盖
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch52.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage1_epoch10.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',
@@ -186,7 +192,7 @@ def main() -> None:
     p.add_argument('--index', type=int, default=0, help='Projector index for stage1 model')
     p.add_argument('--device', default="cuda")
     p.add_argument('--out_dir', default='representations')
-    p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')  # <== 新增
+    p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')
     p.add_argument('--stride', type=int, default=1, help='Sliding stride for centers (1 = per frame)')
     p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='both',
                    help='Cross-attention mode during inference')
@@ -201,8 +207,8 @@ def main() -> None:
         index=args.index,
         device=args.device,
         out_dir=args.out_dir,
-        batch_size=args.batch_size,   # <== 传入
-        stride=args.stride,  # <== 新增
+        batch_size=args.batch_size,
+        stride=args.stride,
         fuse_mode=args.fuse_mode,
     )
 
