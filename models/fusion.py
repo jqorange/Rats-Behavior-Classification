@@ -51,12 +51,23 @@ class EncoderFusion(nn.Module):
         self.projection.set_mode(projection_mode)
 
     def _make_mask(self, B, T, device):
+        """Optionally create a temporal mask for feature dropout.
+
+        During inference we want any stochastic corruption to be disabled.
+        Guarding on ``self.training`` ensures that masks – which randomly
+        zero out time steps – are only generated while training.  When the
+        module is in evaluation mode or ``mask_type`` is ``None`` we return
+        ``None`` so that the encoders see the unmodified inputs.
+        """
+
+        if (not self.training) or (self.mask_type is None):
+            return None
+
         if self.mask_type == 'binomial':
             return generate_binomial_mask(B, T).to(device)
-        elif self.mask_type == 'continuous':
+        if self.mask_type == 'continuous':
             return generate_continuous_mask(B, T).to(device)
-        else:
-            return None
+        return None
 
     @torch.no_grad()
     def _sample_combo_indices(self, device):
