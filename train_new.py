@@ -25,7 +25,6 @@ from models.losses import (
     gaussian_cs_divergence,
 )
 from utils.checkpoint import save_checkpoint, load_checkpoint
-from models.domain_adapter import DomainAdapter
 from utils.tools import take_per_row
 
 
@@ -294,16 +293,21 @@ class ThreeStageTrainer:
                 )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """冻结编码器：先对齐损失（不混 session），再有监督（混 session）。"""
-        # Freeze encoder + cross-attn etc., only train a new projection head
-        # 构建新的 session-adapt projector（与 Stage1 不同）
-        self.model.projection = DomainAdapter(self.d_model, self.d_model, num_sessions=self.num_sessions, dropout=0.1).to(self.device)
-        self.model.projection.set_mode("align")
+        """冻结除 cross head 外的所有模块，只训练小 GRU 对齐。"""
+        # Freeze all parameters first
         for p in self.model.parameters():
             p.requires_grad = False
-        for p in self.model.projection.parameters():
-            p.requires_grad = True
-        self.opt = torch.optim.Adam(self.model.projection.parameters(), lr=self.stage_lrs[2])
+
+        # Only train the cross-modal GRU heads (encoderA/encoderB.head_cross + norm)
+        trainable_params = []
+        for enc in (self.model.encoderA, self.model.encoderB):
+            for module in (enc.head_cross, enc.norm_cross):
+                for p in module.parameters():
+                    p.requires_grad = True
+                    trainable_params.append(p)
+
+        self.model.projection.set_mode("align")
+        self.opt = torch.optim.Adam(trainable_params, lr=self.stage_lrs[2])
 
         for ep in range(epochs):
             preprocess_dataset(
