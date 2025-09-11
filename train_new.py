@@ -21,7 +21,7 @@ from models.fusion import EncoderFusion
 from models.losses import (
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
-    positive_only_supcon_loss,
+    prototype_loss,
     gaussian_cs_divergence,
 )
 from utils.checkpoint import save_checkpoint, load_checkpoint
@@ -52,6 +52,7 @@ class ThreeStageTrainer:
         # ✅ 新 API
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
         self.temporal_unit = 3
+        self.stage2_prototypes: torch.Tensor | None = None
 
     def set_stage_lr(self, stage: int, lr: float) -> None:
         self.stage_lrs[stage] = lr
@@ -59,6 +60,36 @@ class ThreeStageTrainer:
     def _sanitize_inplace(self, t: torch.Tensor) -> torch.Tensor:
         # 把 NaN/Inf 变成 0，防止后续层炸掉
         return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
+
+    def _compute_prototypes(self, loader, extra_feats: torch.Tensor | None = None,
+                             extra_labels: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute class prototypes from a labelled loader."""
+        feats, labels = [], []
+        self.model.eval()
+        with torch.no_grad():
+            for batch in loader:
+                imu = self._sanitize_inplace(batch["imu"].to(self.device))
+                dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
+                y = batch["label"].to(self.device)
+                session_idx = batch["session_idx"].to(self.device)
+                with torch.amp.autocast('cuda', enabled=(self.device == 'cuda')):
+                    emb = self.model(imu, dlc, session_idx=session_idx)[0]
+                pooled = emb.max(dim=1).values
+                feats.append(pooled)
+                labels.append(y.argmax(dim=1))
+        if extra_feats is not None and extra_labels is not None:
+            feats.append(extra_feats)
+            labels.append(extra_labels)
+        feats = torch.cat(feats, dim=0)
+        labels = torch.cat(labels, dim=0)
+        n_classes = int(labels.max().item()) + 1
+        protos = []
+        for k in range(n_classes):
+            mask = labels == k
+            protos.append(feats[mask].mean(dim=0))
+        protos = torch.stack(protos, dim=0)
+        self.model.train()
+        return protos
 
     def _step_unsup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch['imu'].to(self.device))
@@ -193,7 +224,8 @@ class ThreeStageTrainer:
             emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
             jitter_std = 0.01
             emb = emb + torch.randn_like(emb) * jitter_std
-            loss_sup = positive_only_supcon_loss(emb, labels)
+            target = labels.argmax(dim=1)
+            loss_sup = prototype_loss(emb, self.stage2_prototypes, target)
             loss_cs = (
                 gaussian_cs_divergence(A_to_B, B_self.detach())
                 + gaussian_cs_divergence(B_to_A, A_self.detach())
@@ -208,6 +240,19 @@ class ThreeStageTrainer:
             "loss_cs": loss_cs.detach(),
             "loss_l2": loss_l2.detach(),
         }
+
+    def _step_unsup_stage2(self, batch: dict):
+        unsup_loss, loss_dict = self._step_unsup(batch)
+        imu = self._sanitize_inplace(batch["imu"].to(self.device))
+        dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
+        session_idx = batch["session_idx"].to(self.device)
+        with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
+            emb_full = self.model(imu, dlc, session_idx=session_idx)[0]
+        proto_loss, feats, pseudo = prototype_loss(emb_full, self.stage2_prototypes)
+        total = 0.99 * unsup_loss + 0.01 * proto_loss
+        loss_dict = {f"unsup_{k}": v for k, v in loss_dict.items()}
+        loss_dict.update({"loss_proto": proto_loss.detach()})
+        return total, loss_dict, feats, pseudo
 
     def _step_sup(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         imu = self._sanitize_inplace(batch["imu"].to(self.device))
@@ -293,15 +338,9 @@ class ThreeStageTrainer:
                 )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """冻结除 cross head 外的所有模块，只训练小 GRU 对齐。
-
-        无监督阶段同样引入对比损失，且仍在单个 session 内进行。
-        """
-        # Freeze all parameters first
+        """Adaptation stage with alternating unsupervised and supervised updates."""
         for p in self.model.parameters():
             p.requires_grad = False
-
-        # Only train the cross-modal GRU heads (encoderA/encoderB.head_cross + norm)
         trainable_params = []
         for enc in (self.model.encoderA, self.model.encoderB):
             for module in (enc.head_cross, enc.norm_cross):
@@ -321,8 +360,7 @@ class ThreeStageTrainer:
                 seed=1234 + ep,
                 use_unlabeled=True,
             )
-            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
-            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
+            unsup_batches = list(load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False))
 
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_sup",
@@ -332,13 +370,52 @@ class ThreeStageTrainer:
                 seed=1234 + ep,
                 use_unlabeled=False,
             )
-            it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
-            losses_sup = self._run_epoch(it_sup, self._step_sup_stage2)
-            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
-            combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
-            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
+            sup_batches = list(load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True))
+
+            self.stage2_prototypes = self._compute_prototypes(sup_batches)
+            sup_iter = iter(sup_batches)
+            pseudo_feats, pseudo_labels = [], []
+            loss_sums = {}
+
+            for unsup_batch in unsup_batches:
+                self.opt.zero_grad(set_to_none=True)
+                loss_u, dict_u, feats, pseudo = self._step_unsup_stage2(unsup_batch)
+                self.scaler.scale(loss_u).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
+                for k, v in dict_u.items():
+                    loss_sums[k] = loss_sums.get(k, 0.0) + v.item()
+                loss_sums["unsup_total"] = loss_sums.get("unsup_total", 0.0) + loss_u.item()
+                if feats is not None:
+                    pseudo_feats.append(feats)
+                    pseudo_labels.append(pseudo)
+
+                try:
+                    sup_batch = next(sup_iter)
+                except StopIteration:
+                    sup_iter = iter(sup_batches)
+                    sup_batch = next(sup_iter)
+                self.opt.zero_grad(set_to_none=True)
+                loss_s, dict_s = self._step_sup_stage2(sup_batch)
+                self.scaler.scale(loss_s).backward()
+                self.scaler.step(self.opt)
+                self.scaler.update()
+                for k, v in dict_s.items():
+                    loss_sums[f"sup_{k}"] = loss_sums.get(f"sup_{k}", 0.0) + v.item()
+                loss_sums["sup_total"] = loss_sums.get("sup_total", 0.0) + loss_s.item()
+
+            n = max(len(unsup_batches), 1)
+            for k in loss_sums:
+                loss_sums[k] /= n
+
+            if pseudo_feats:
+                pf = torch.cat(pseudo_feats, dim=0)
+                pl = torch.cat(pseudo_labels, dim=0)
+                self.stage2_prototypes = self._compute_prototypes(sup_batches, pf, pl)
+
             self.total_epochs += 1
-            print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
+            total = loss_sums.get("unsup_total", 0.0) + loss_sums.get("sup_total", 0.0)
+            print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in loss_sums.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
                     self.model,

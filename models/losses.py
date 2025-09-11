@@ -143,53 +143,42 @@ def temporal_contrastive_loss(z1, z2):
     return loss
 
 
-def positive_only_supcon_loss(z, y, temperature=0.07, eps=1e-8, return_score=False):
-    """
-    Only attracts samples with high label overlap (positive Jaccard),
-    without pushing negatives apart.
-    Output is a positive loss: lower means better alignment.
+def prototype_loss(z, prototypes, labels=None, threshold: float = 0.9):
+    """Cross-entropy loss between features and class prototypes.
+
+    When ``labels`` is ``None`` pseudo labels are inferred from the
+    highest-similarity prototype.  Only samples with similarity above
+    ``threshold`` contribute to the loss and are returned for optional
+    prototype updates.
 
     Args:
-        z: (B, T, D) - time series embeddings
-        y: (B, N)    - multi-label binary tags
-        return_score: whether to return alignment score (for logging)
+        z: ``(B, T, D)`` feature tensor.
+        prototypes: ``(C, D)`` prototype tensor.
+        labels: Optional ``(B,)`` class indices.
+        threshold: confidence required for pseudo labels.
 
     Returns:
-        loss: positive scalar
-        score (optional): average alignment score in [0, 1]
+        If ``labels`` is provided, returns a scalar loss.  Otherwise
+        returns ``(loss, feats, pseudo)`` where ``feats`` and ``pseudo``
+        are the pooled features and assigned labels for high-confidence
+        samples.
     """
+
     B, T, D = z.shape
+    feats = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)
+    feats = F.normalize(feats, dim=-1)
+    prototypes = F.normalize(prototypes, dim=-1)
+    logits = torch.matmul(feats, prototypes.T)
 
-    # Max-pool over time
-    z = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)  # (B, D)
-    z = F.normalize(z, dim=-1)
+    if labels is not None:
+        return F.cross_entropy(logits, labels)
 
-    y = y.float()  # (B, N)
-
-    # Cosine similarity (B, B)
-    sim = torch.matmul(z, z.T) / temperature
-
-    # === Positive weights only ===
-    inter = torch.matmul(y, y.T)
-    union = (y.unsqueeze(1) + y.unsqueeze(0)).clamp(max=1).sum(-1)
-    jaccard = inter / (union + eps)  # (B, B)
-
-    # Mask out self-similarity
-    mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
-    sim = sim[mask].view(B, B - 1)
-    jaccard = jaccard[mask].view(B, B - 1)
-
-    # Only use jaccard as positive weights
-    weights = jaccard / (jaccard.sum(dim=1, keepdim=True) + eps)
-
-    # Weighted positive-only similarity
-    pos_sim = (weights * sim).sum(dim=1)  # (B,)
-    score = pos_sim.mean()  # average alignment score
-
-    # Positive loss: lower = less aligned
-    loss = 1.0 - score
-
-    return loss
+    max_sims, pseudo = logits.max(dim=1)
+    mask = max_sims > threshold
+    if mask.any():
+        loss = F.cross_entropy(logits[mask], pseudo[mask])
+        return loss, feats[mask].detach(), pseudo[mask].detach()
+    return feats.new_tensor(0.0), None, None
 
 def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
     B, T, D = z.shape

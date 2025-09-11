@@ -47,7 +47,7 @@ Below is a high level summary of the public functions and class methods found in
 * **hierarchical_contrastive_loss** – instance and temporal contrastive loss across multiple scales.
 * **instance_contrastive_loss** – contrast between samples within the same batch.
 * **temporal_contrastive_loss** – contrast across time within each sequence.
-* **positive_only_supcon_loss** – supervised contrastive loss that only attracts positives.
+* **prototype_loss** – cross-entropy loss pulling features toward class prototypes.
 * **multilabel_supcon_loss_bt** – multi‑label supervised contrastive loss with pooling.
 * **compute_contrastive_losses** – dispatch supervised or unsupervised contrastive losses depending on stage.
 * **CenterLoss.__init__** – maintain class centroids.
