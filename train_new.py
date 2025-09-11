@@ -1,7 +1,7 @@
 # train_three_stage.py
 """Simplified three-stage training script using the new window dataset.
 
-此脚本展示三阶段训练流程：Stage1(无监督/单会话批)、Stage2(冻结编码器+无监督→有监督)、
+此脚本展示三阶段训练流程：Stage1(无监督/单会话批)、Stage2(冻结编码器+无监督配合原型)、
 Stage3(联训)。预处理阶段新增“按 index 分组、每组统一窗口长度 T”，并支持多线程。
 """
 
@@ -210,36 +210,6 @@ class ThreeStageTrainer:
             "loss_l2": loss_l2.detach(),
         }
 
-    def _step_sup_stage2(self, batch: dict) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        imu = self._sanitize_inplace(batch["imu"].to(self.device))
-        dlc = self._sanitize_inplace(batch["dlc"].to(self.device))
-        labels = batch["label"].to(self.device)
-        session_idx = batch["session_idx"].to(self.device)
-
-        scale = torch.empty(imu.size(0), 1, 1, device=imu.device).uniform_(0.8, 1.2)
-        imu = imu * scale
-        dlc = dlc * scale
-
-        with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
-            emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
-            jitter_std = 0.01
-            emb = emb + torch.randn_like(emb) * jitter_std
-            target = labels.argmax(dim=1)
-            loss_sup = prototype_loss(emb, self.stage2_prototypes, target)
-            loss_cs = (
-                gaussian_cs_divergence(A_to_B, B_self.detach())
-                + gaussian_cs_divergence(B_to_A, A_self.detach())
-            )
-            loss_l2 = (
-                torch.norm(A_to_B - B_self.detach(), dim=-1).mean()
-                + torch.norm(B_to_A - A_self.detach(), dim=-1).mean()
-            )
-            loss = loss_sup + loss_cs + loss_l2
-        return loss, {
-            "loss_sup": loss_sup.detach(),
-            "loss_cs": loss_cs.detach(),
-            "loss_l2": loss_l2.detach(),
-        }
 
     def _step_unsup_stage2(self, batch: dict):
         unsup_loss, loss_dict = self._step_unsup(batch)
@@ -338,7 +308,7 @@ class ThreeStageTrainer:
                 )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """Adaptation stage with alternating unsupervised and supervised updates."""
+        """Adaptation stage using unsupervised updates with prototype regularization."""
         for p in self.model.parameters():
             p.requires_grad = False
         trainable_params = []
@@ -373,7 +343,6 @@ class ThreeStageTrainer:
             sup_batches = list(load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True))
 
             self.stage2_prototypes = self._compute_prototypes(sup_batches)
-            sup_iter = iter(sup_batches)
             pseudo_feats, pseudo_labels = [], []
             loss_sums = {}
 
@@ -390,20 +359,6 @@ class ThreeStageTrainer:
                     pseudo_feats.append(feats)
                     pseudo_labels.append(pseudo)
 
-                try:
-                    sup_batch = next(sup_iter)
-                except StopIteration:
-                    sup_iter = iter(sup_batches)
-                    sup_batch = next(sup_iter)
-                self.opt.zero_grad(set_to_none=True)
-                loss_s, dict_s = self._step_sup_stage2(sup_batch)
-                self.scaler.scale(loss_s).backward()
-                self.scaler.step(self.opt)
-                self.scaler.update()
-                for k, v in dict_s.items():
-                    loss_sums[f"sup_{k}"] = loss_sums.get(f"sup_{k}", 0.0) + v.item()
-                loss_sums["sup_total"] = loss_sums.get("sup_total", 0.0) + loss_s.item()
-
             n = max(len(unsup_batches), 1)
             for k in loss_sums:
                 loss_sums[k] /= n
@@ -414,7 +369,7 @@ class ThreeStageTrainer:
                 self.stage2_prototypes = self._compute_prototypes(sup_batches, pf, pl)
 
             self.total_epochs += 1
-            total = loss_sums.get("unsup_total", 0.0) + loss_sums.get("sup_total", 0.0)
+            total = loss_sums.get("unsup_total", 0.0)
             print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in loss_sums.items()))
             if self.total_epochs % save_gap == 0:
                 save_checkpoint(
