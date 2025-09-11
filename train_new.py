@@ -219,6 +219,7 @@ class ThreeStageTrainer:
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
             emb_full = self.model(imu, dlc, session_idx=session_idx)[0]
         proto_loss, feats, pseudo = prototype_loss(emb_full, self.stage2_prototypes)
+        # Use a stronger prototype signal similar to the reference implementation
         total = 0.99 * unsup_loss + 0.01 * proto_loss
         loss_dict = {f"unsup_{k}": v for k, v in loss_dict.items()}
         loss_dict.update({"loss_proto": proto_loss.detach()})
@@ -317,6 +318,10 @@ class ThreeStageTrainer:
                 for p in module.parameters():
                     p.requires_grad = True
                     trainable_params.append(p)
+        # Also adapt the final projector for session-level alignment
+        for p in self.model.projection.parameters():
+            p.requires_grad = True
+            trainable_params.append(p)
 
         self.model.projection.set_mode("align")
         self.opt = torch.optim.Adam(trainable_params, lr=self.stage_lrs[2])
