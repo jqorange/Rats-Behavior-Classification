@@ -293,7 +293,10 @@ class ThreeStageTrainer:
                 )
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
-        """冻结除 cross head 外的所有模块，只训练小 GRU 对齐。"""
+        """冻结除 cross head 外的所有模块，只训练小 GRU 对齐。
+
+        无监督阶段同样引入对比损失，且仍在单个 session 内进行。
+        """
         # Freeze all parameters first
         for p in self.model.parameters():
             p.requires_grad = False
@@ -318,8 +321,8 @@ class ThreeStageTrainer:
                 seed=1234 + ep,
                 use_unlabeled=True,
             )
-            it_align = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
-            losses_align = self._run_epoch(it_align, self._step_align)
+            it_unsup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_unsup", mix=False)
+            losses_unsup = self._run_epoch(it_unsup, self._step_unsup)
 
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_sup",
@@ -331,9 +334,9 @@ class ThreeStageTrainer:
             )
             it_sup = load_preprocessed_batches(dataset.sessions, dataset.session_to_idx, out_dir="Dataset_sup", mix=True)
             losses_sup = self._run_epoch(it_sup, self._step_sup_stage2)
-            combined = {f"align_{k}": v for k, v in losses_align.items()}
+            combined = {f"unsup_{k}": v for k, v in losses_unsup.items()}
             combined.update({f"sup_{k}": v for k, v in losses_sup.items()})
-            total = combined.get("align_total", 0.0) + combined.get("sup_total", 0.0)
+            total = combined.get("unsup_total", 0.0) + combined.get("sup_total", 0.0)
             self.total_epochs += 1
             print(f"[Stage2][Epoch {self.total_epochs}] total={total:.4f} " + " ".join(f"{k}={v:.4f}" for k, v in combined.items()))
             if self.total_epochs % save_gap == 0:
