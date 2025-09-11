@@ -49,6 +49,12 @@ class ThreeStageTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         self.total_epochs = 0
 
+        # Track which stage configuration is active
+        self.current_stage = 1
+
+        # cache for optional optimizer loading
+        self._optimizer_state = None
+
         # ✅ 新 API
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
         self.temporal_unit = 3
@@ -272,12 +278,45 @@ class ThreeStageTrainer:
             loss_sums[k] /= max(len(batches), 1)
         return loss_sums
 
-    def load_from(self, path: str, expected_stage: int) -> int:
+    def prepare_stage2(self) -> None:
+        """Configure model/optimizer for stage 2 without running training."""
+        for p in self.model.parameters():
+            p.requires_grad = False
+        trainable_params = []
+        for enc in (self.model.encoderA, self.model.encoderB):
+            for module in (enc.head_cross, enc.norm_cross):
+                for p in module.parameters():
+                    p.requires_grad = True
+                    trainable_params.append(p)
+        for p in self.model.projection.parameters():
+            p.requires_grad = True
+            trainable_params.append(p)
+        self.model.projection.set_mode("align")
+        self.opt = torch.optim.Adam(trainable_params, lr=self.stage_lrs[2])
+        self.current_stage = 2
+
+    def prepare_stage3(self) -> None:
+        """Configure model/optimizer for stage 3 without running training."""
+        for p in self.model.parameters():
+            p.requires_grad = True
+        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[3])
+        self.current_stage = 3
+
+    def load_from(self, path: str, expected_stage: int, *, load_optimizer: bool = True) -> int:
         """加载 checkpoint 并返回其中记录的阶段。"""
+        opt = self.opt if load_optimizer else None
         self.total_epochs, stage = load_checkpoint(
-            self.model, self.model.projection, self.opt, path, expected_stage=expected_stage
+            self.model, self.model.projection, opt, path, expected_stage=expected_stage
         )
+        if not load_optimizer:
+            ckpt = torch.load(path, map_location="cpu")
+            self._optimizer_state = ckpt.get("optimizer_state")
         return stage
+
+    def load_optimizer_state(self) -> None:
+        if self._optimizer_state is not None:
+            self.opt.load_state_dict(self._optimizer_state)
+            self._optimizer_state = None
 
     def stage1(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """无监督学习：每个 batch 内不混 session（by_session），每组统一 T，
@@ -285,6 +324,7 @@ class ThreeStageTrainer:
         for p in self.model.parameters():
             p.requires_grad = True
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
+        self.current_stage = 1
         for ep in range(epochs):
             preprocess_dataset(
                 dataset, batch_size, out_dir="Dataset_unsup",
@@ -310,21 +350,8 @@ class ThreeStageTrainer:
 
     def stage2(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """Adaptation stage using unsupervised updates with prototype regularization."""
-        for p in self.model.parameters():
-            p.requires_grad = False
-        trainable_params = []
-        for enc in (self.model.encoderA, self.model.encoderB):
-            for module in (enc.head_cross, enc.norm_cross):
-                for p in module.parameters():
-                    p.requires_grad = True
-                    trainable_params.append(p)
-        # Also adapt the final projector for session-level alignment
-        for p in self.model.projection.parameters():
-            p.requires_grad = True
-            trainable_params.append(p)
-
-        self.model.projection.set_mode("align")
-        self.opt = torch.optim.Adam(trainable_params, lr=self.stage_lrs[2])
+        if self.current_stage != 2:
+            self.prepare_stage2()
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -388,9 +415,8 @@ class ThreeStageTrainer:
 
     def stage3(self, dataset: RatsWindowDataset, batch_size: int, epochs: int = 1, *, n_workers_preproc: int = 0, save_gap=1) -> None:
         """联训：对齐损失 + 有监督都在混 session 的 batch 上进行。"""
-        for p in self.model.parameters():
-            p.requires_grad = True
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[3])
+        if self.current_stage != 3:
+            self.prepare_stage3()
 
         for ep in range(epochs):
             preprocess_dataset(
@@ -471,6 +497,14 @@ def main() -> None:
     stage3_epochs = 1
 
     start_epoch = args.resume_epoch
+
+    # Determine stage to start from before loading checkpoints
+    start_stage = 1
+    if start_epoch > stage1_epochs:
+        start_stage = 2
+    if start_epoch > stage1_epochs + stage2_epochs:
+        start_stage = 3
+
     if start_epoch > 0:
         if start_epoch <= stage1_epochs:
             ckpt_stage = 1
@@ -479,14 +513,18 @@ def main() -> None:
         else:
             ckpt_stage = 3
         ckpt_path = os.path.join("checkpoints", f"stage{ckpt_stage}_epoch{start_epoch}.pt")
-        trainer.load_from(ckpt_path, expected_stage=ckpt_stage)
-
-    # 根据 epoch 判断从哪阶段开始
-    start_stage = 1
-    if start_epoch > stage1_epochs:
-        start_stage = 2
-    if start_epoch > stage1_epochs + stage2_epochs:
-        start_stage = 3
+        if ckpt_stage == 2:
+            trainer.prepare_stage2()
+            trainer.load_from(ckpt_path, expected_stage=ckpt_stage)
+        elif ckpt_stage == 3:
+            trainer.prepare_stage3()
+            trainer.load_from(ckpt_path, expected_stage=ckpt_stage)
+        else:
+            trainer.load_from(ckpt_path, expected_stage=ckpt_stage, load_optimizer=(start_stage == 1))
+            if start_stage == 2:
+                trainer.prepare_stage2()
+            elif start_stage == 3:
+                trainer.prepare_stage3()
 
     if start_stage <= 1:
         print(">>> Stage 1 (unsupervised)...")
