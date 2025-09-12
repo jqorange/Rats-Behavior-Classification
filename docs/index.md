@@ -31,6 +31,7 @@ Training proceeds in three distinct stages:
    * Samples with real labels and high‑confidence pseudo labels (≥0.95 similarity) are trained with supervised contrastive learning using heavy Gaussian noise.
    * An additional unsupervised contrastive loss mixes sequences from different sessions within the same batch.
    * Prototype loss still follows a FixMatch style pseudo‑labelling scheme.
+  * Samples are drawn inversely proportional to class counts and mixed up before computing the supervised contrastive loss.
 
 After these stages an MLP classifier is trained. High confidence predictions are added as new training samples to further improve performance.
 

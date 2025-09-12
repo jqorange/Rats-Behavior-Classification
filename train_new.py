@@ -59,6 +59,8 @@ class ThreeStageTrainer:
         self.scaler = torch.amp.GradScaler('cuda', enabled=(self.device == "cuda"))
         self.temporal_unit = 3
         self.stage2_prototypes: torch.Tensor | None = None
+        # inverse-frequency weights for stage3 supervised sampling
+        self.class_weights: torch.Tensor | None = None
 
     def set_stage_lr(self, stage: int, lr: float) -> None:
         self.stage_lrs[stage] = lr
@@ -241,6 +243,21 @@ class ThreeStageTrainer:
         imu = imu * scale
         dlc = dlc * scale
 
+        if self.class_weights is not None:
+            weights = self.class_weights.to(labels.device)
+            sample_w = (labels * weights).max(dim=1).values
+            mix_idx = torch.multinomial(sample_w, labels.size(0), replacement=True)
+            partner_idx = torch.randint(0, labels.size(0), (len(mix_idx),), device=labels.device)
+            lam = 0.5
+            imu_mix = lam * imu[mix_idx] + (1 - lam) * imu[partner_idx]
+            dlc_mix = lam * dlc[mix_idx] + (1 - lam) * dlc[partner_idx]
+            label_mix = torch.clamp(labels[mix_idx] + labels[partner_idx], 0, 1)
+            session_mix = session_idx[mix_idx]
+            imu = torch.cat([imu, imu_mix], dim=0)
+            dlc = torch.cat([dlc, dlc_mix], dim=0)
+            labels = torch.cat([labels, label_mix], dim=0)
+            session_idx = torch.cat([session_idx, session_mix], dim=0)
+
         with torch.amp.autocast('cuda', enabled=(self.device == "cuda")):
             emb, A_self, B_self, A_to_B, B_to_A = self.model(imu, dlc, session_idx=session_idx)
             jitter_std = 0.01
@@ -417,6 +434,13 @@ class ThreeStageTrainer:
         """联训：对齐损失 + 有监督都在混 session 的 batch 上进行。"""
         if self.current_stage != 3:
             self.prepare_stage3()
+
+        if self.class_weights is None:
+            counts = torch.zeros(dataset.num_labels)
+            for _, lab, _ in dataset.samples:
+                counts += lab
+            weights = 1.0 / (counts + 1e-6)
+            self.class_weights = weights / weights.sum()
 
         for ep in range(epochs):
             preprocess_dataset(
