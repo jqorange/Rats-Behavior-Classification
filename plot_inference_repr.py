@@ -227,7 +227,7 @@ if __name__ == "__main__":
         description="Plot inferred representations with optional evaluation"
     )
     parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_new", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F6D5_outdoor_1"], help="Session names")
     parser.add_argument(
         "--rep_dir", default="representations", help="Directory of .pt representation files"
     )

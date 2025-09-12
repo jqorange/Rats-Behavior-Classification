@@ -461,10 +461,10 @@ class ThreeStageTrainer:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume-epoch", type=int, default=0, help="Resume training from given epoch")
-    parser.add_argument("--lr-stage1", type=float, default=1e-3, help="Learning rate for stage 1")
-    parser.add_argument("--lr-stage2", type=float, default=1e-3, help="Learning rate for stage 2")
-    parser.add_argument("--lr-stage3", type=float, default=1e-3, help="Learning rate for stage 3")
+    parser.add_argument("--resume-epoch", type=int, default=44, help="Resume training from given epoch")
+    parser.add_argument("--lr-stage1", type=float, default=1e-4, help="Learning rate for stage 1")
+    parser.add_argument("--lr-stage2", type=float, default=1e-4, help="Learning rate for stage 2")
+    parser.add_argument("--lr-stage3", type=float, default=1e-4, help="Learning rate for stage 3")
     args = parser.parse_args()
 
     data_root = r"D:\Jiaqi\Datasets\Rats\TrainData_new"
@@ -492,9 +492,9 @@ def main() -> None:
     # 预处理多线程数：HDF5 写还是串行，线程只做裁剪与拼 batch
     n_workers_preproc = 1
 
-    stage1_epochs = 10000
-    stage2_epochs = 1
-    stage3_epochs = 1
+    stage1_epochs = 30
+    stage2_epochs = 14
+    stage3_epochs = 60
 
     start_epoch = args.resume_epoch
 
