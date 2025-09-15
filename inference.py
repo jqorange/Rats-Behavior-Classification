@@ -10,6 +10,48 @@ from models.fusion import EncoderFusion
 from utils.checkpoint import load_checkpoint
 
 
+def _infer_model_config(state: dict[str, torch.Tensor]) -> tuple[int, int]:
+    """Infer ``d_model`` and ``num_sessions`` from a checkpoint state dict.
+
+    Older checkpoints stored parameters for session-aware adapters while the
+    latest training code uses a simpler encoder without those layers.  The
+    inference script therefore needs to be able to recover the model
+    dimensions from whichever keys are available.
+    """
+
+    def _first_tensor(keys):
+        for key in keys:
+            tensor = state.get(key)
+            if tensor is not None:
+                return tensor
+        return None
+
+    d_model_src = _first_tensor(
+        [
+            "encoderA.adapter.linear.weight",
+            "encoderA.input_proj.weight",
+            "encoderA.norm_in.weight",
+        ]
+    )
+    if d_model_src is None:
+        available = ", ".join(sorted(state.keys()))
+        raise KeyError(
+            "Unable to infer d_model from checkpoint. Available keys: " + available
+        )
+
+    d_model = int(d_model_src.shape[0])
+
+    session_src = _first_tensor(
+        [
+            "encoderA.adapter.session_embed.weight",
+            "encoderA.session_embed.weight",
+        ]
+    )
+    num_sessions = int(session_src.shape[0]) if session_src is not None else 0
+
+    return d_model, num_sessions
+
+
 @torch.no_grad()
 def latest_checkpoint(ckpt_dir: str) -> str:
     """Return the most recently modified checkpoint file in a directory."""
@@ -95,8 +137,7 @@ def run_inference(
 
     ckpt = torch.load(ckpt_path, map_location='cpu')
     state = ckpt.get('model_state', {})
-    d_model = state['encoderA.adapter.linear.weight'].shape[0]
-    num_sessions = state['encoderA.adapter.session_embed.weight'].shape[0]
+    d_model, num_sessions = _infer_model_config(state)
 
     model = EncoderFusion(
         N_feat_A=num_imu,
@@ -109,12 +150,17 @@ def run_inference(
     model.eval()
 
     _, stage = load_checkpoint(model, model.projection, optimizer=None, path=ckpt_path)
-    if stage == 1:
-        model.projection.set_mode('aware')
-        if index is None:
-            raise ValueError('Stage1 checkpoint requires --index for projector embedding')
+    has_set_mode = hasattr(model.projection, 'set_mode')
+    if has_set_mode:
+        if stage == 1:
+            model.projection.set_mode('aware')
+            if index is None:
+                raise ValueError('Stage1 checkpoint requires --index for projector embedding')
+        else:
+            model.projection.set_mode('align')
+            if index is None:
+                index = 0
     else:
-        model.projection.set_mode('align')
         if index is None:
             index = 0
 
