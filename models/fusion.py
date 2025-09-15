@@ -1,10 +1,37 @@
+from dataclasses import dataclass
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .encoder import Encoder
 from .masking import generate_continuous_mask, generate_binomial_mask
-from .domain_adapter import DomainAdapter
+
+
+@dataclass
+class FusionOutput:
+    fused: torch.Tensor
+    imu_self: torch.Tensor
+    dlc_self: torch.Tensor
+    imu_to_dlc: torch.Tensor
+    dlc_to_imu: torch.Tensor
+    imu_recon: torch.Tensor
+    dlc_recon: torch.Tensor
+
+
+class ProjectionHead(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_model, 2 * d_model),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(2 * d_model, d_model),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 class EncoderFusion(nn.Module):
     """
@@ -46,9 +73,8 @@ class EncoderFusion(nn.Module):
         self.norm  = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
 
-        # Final projector (session-aware if enabled by mode)
-        self.projection = DomainAdapter(d_model, d_model, num_sessions=num_sessions, dropout=dropout)
-        self.projection.set_mode(projection_mode)
+        # Final projector without session aware behaviour
+        self.projection = ProjectionHead(d_model, dropout)
 
     def _make_mask(self, B, T, device):
         """Optionally create a temporal mask for feature dropout.
@@ -70,26 +96,17 @@ class EncoderFusion(nn.Module):
         return None
 
     @torch.no_grad()
-    def _sample_combo_indices(self, device):
-        """
-        Uniformly sample among three valid (query, key/value) combos.
-        Combos:
-            (q=B_self, kv=A_self),
-            (q=B_self, kv=B_to_A),
-            (q=A_to_B, kv=A_self)
-        Returns:
-            idx_q, idx_kv corresponding to entries in q_candidates/kv_candidates.
-        """
+    def _sample_combo_indices(self, device: torch.device, batch_size: int) -> torch.Tensor:
         combos = torch.tensor([[0, 0], [0, 1], [1, 0]], device=device)
-        choice = torch.randint(0, combos.size(0), (1,), device=device).item()
-        return combos[choice].tolist()
+        return torch.randint(0, combos.size(0), (batch_size,), device=device)
 
-    def forward(self, xA, xB, session_idx=None, attn_mode: str | None = None):
+    def forward(self, xA, xB, session_idx: Optional[torch.Tensor] = None, mask: Optional[torch.Tensor] = None,
+                attn_mode: Optional[str] = None) -> FusionOutput:
         """
         Args:
             xA: [B, T, N_feat_A]
             xB: [B, T, N_feat_B]
-            session_idx: optional session ids for DomainAdapter
+            session_idx: unused placeholder kept for compatibility
 
         Returns:
             h: [B, T, D] fused representation after projector + L2 norm
@@ -100,36 +117,50 @@ class EncoderFusion(nn.Module):
         device = xA.device
 
         # === Mask (optional, shared to both for simplicity) ===
-        mask = self._make_mask(B, T, device)
+        mask_to_use = self._make_mask(B, T, device)
+        if mask is not None and mask_to_use is not None:
+            mask = mask & mask_to_use
+        elif mask_to_use is not None:
+            mask = mask_to_use
 
         # === Encode both modalities ===
-        A_self, A_to_B = self.encoderA(xA, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
-        B_self, B_to_A = self.encoderB(xB, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
+        A_self, A_to_B, A_recon = self.encoderA(xA, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
+        B_self, B_to_A, B_recon = self.encoderB(xB, session_idx=session_idx, mask=mask)  # [B, T, D], [B, T, D]
 
         # === Build candidate sets ===
         # Query candidates (B-space):  {B_self, A_to_B}
         # Key/Value candidates (A-space): {A_self, B_to_A}
-        kv_candidates  = (A_self, A_self)
-        q_candidates = (B_self, B_self)
+        q_candidates = torch.stack((B_self, A_to_B), dim=0)
+        kv_candidates = torch.stack((A_self, B_to_A), dim=0)
+
+        combos = torch.tensor([[0, 0], [0, 1], [1, 0]], device=device)
 
         # === Select cross-attention pair ===
         if attn_mode is None:
-            idx_q, idx_kv = self._sample_combo_indices(device)
+            combo_idx = self._sample_combo_indices(device, B)
         else:
             attn_mode = attn_mode.lower()
-            if attn_mode == 'imu':           # A with A_to_B
-                idx_q, idx_kv = 1, 0
-            elif attn_mode == 'dlc':         # B with B_to_A
-                idx_q, idx_kv = 0, 1
-            elif attn_mode == 'both':        # A with B
-                idx_q, idx_kv = 0, 0
+            if attn_mode == 'imu':
+                combo_idx = combos.new_full((B,), 2)
+            elif attn_mode == 'dlc':
+                combo_idx = combos.new_full((B,), 1)
+            elif attn_mode == 'both':
+                combo_idx = combos.new_full((B,), 0)
             else:
                 raise ValueError(f"Unknown attn_mode: {attn_mode}")
-        q  = q_candidates[idx_q]      # [B, T, D]
-        kv = kv_candidates[idx_kv]    # [B, T, D]
 
-        # === Cross-attention (single direction, A<-B by construction of spaces) ===
-        m, _ = self.cross_attn(query=q, key=kv, value=kv, need_weights=False)  # [B, T, D]
+        combo_pairs = combos[combo_idx]  # [B,2]
+        all_attn = []
+        for iq, ikv in combos:
+            q_i = q_candidates[iq]
+            kv_i = kv_candidates[ikv]
+            m_i, _ = self.cross_attn(query=q_i, key=kv_i, value=kv_i, need_weights=False)
+            all_attn.append(m_i)
+        attn_stack = torch.stack(all_attn, dim=0)
+
+        batch_indices = torch.arange(B, device=device)
+        q = q_candidates[combo_pairs[:, 0], batch_indices]
+        m = attn_stack[combo_idx, batch_indices]
 
         # === Gated residual fusion on query side ===
         g = torch.sigmoid(self.gate(q))                    # [B, T, 1]
@@ -137,10 +168,16 @@ class EncoderFusion(nn.Module):
         h = self.norm(h)
         h = torch.clamp(h, min=-5.0, max=5.0)
 
-        # === Final projector (session aware if enabled) + L2 normalize ===
-        proj_idx = session_idx if self.projection.mode == "aware" else None
-        h = self.projection(h, proj_idx)                # [B, T, D]
+        # === Final projector + L2 normalize ===
+        h = self.projection(h)                          # [B, T, D]
         h = F.normalize(h, dim=-1)
 
-        # Also return self representations for cross-modal reconstruction losses
-        return h, A_self, B_self, A_to_B, B_to_A
+        return FusionOutput(
+            fused=h,
+            imu_self=A_self,
+            dlc_self=B_self,
+            imu_to_dlc=A_to_B,
+            dlc_to_imu=B_to_A,
+            imu_recon=A_recon,
+            dlc_recon=B_recon,
+        )

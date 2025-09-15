@@ -153,7 +153,8 @@ def run_inference(
                 sess_idx_b = torch.full((len(centres_b),), index, dtype=torch.long, device=device)
 
                 # 前向得到时序表征 (B, T, D)
-                feat_seq_b, *_ = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
+                output = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
+                feat_seq_b = output.fused
 
                 # ==== 关键修改：时间维做 max pooling 得到 (B, D) ====
                 # 原来是取中心帧：feat_b = feat_seq_b[:, T // 2]
@@ -164,7 +165,7 @@ def run_inference(
                 feats_T_batches.append(feat_b)
 
                 # 及时释放显存
-                del imu_win_b, dlc_win_b, sess_idx_b, feat_seq_b, feat_b
+                del imu_win_b, dlc_win_b, sess_idx_b, output, feat_seq_b, feat_b
                 if isinstance(device, str) and device.startswith('cuda'):
                     torch.cuda.empty_cache()
 
@@ -181,7 +182,7 @@ def run_inference(
 
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage3_epoch100.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage2_epoch100.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',
@@ -189,7 +190,7 @@ def main() -> None:
                    help='Session names')
     p.add_argument('--mode', choices=['full', 'labeled'], default='full')
     p.add_argument('--window', choices=['64', 'multi'], default='multi')
-    p.add_argument('--index', type=int, default=0, help='Projector index for stage1 model')
+    p.add_argument('--index', type=int, default=0, help='Compatibility placeholder for historical adapters')
     p.add_argument('--device', default="cuda")
     p.add_argument('--out_dir', default='representations')
     p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')

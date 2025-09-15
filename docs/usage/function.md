@@ -29,19 +29,17 @@ Below is a high level summary of the public functions and class methods found in
 * **DilatedConvEncoder.__init__** – stack multiple residual blocks with increasing dilation.
 * **DilatedConvEncoder.forward** – encode a sequence.
 
-## models/domain_adapter.py
-* **_build_align_block** – helper that creates a small alignment MLP.
-* **DomainAdapter.__init__** – projection layer with optional session embedding.
-* **DomainAdapter.set_mode** – choose between `aware`, `align` or `none` modes.
-* **DomainAdapter.forward** – apply the adapter to input features.
-
 ## models/encoder.py
-* **Encoder.__init__** – build the domain adapter, dilated conv stack and Transformer layer.
-* **Encoder.forward** – encode a sequence with optional masking.
+* **Encoder.__init__** – linear projection, dilated conv stack and dual GRU heads.
+* **Encoder.forward** – encode a sequence with optional masking and return reconstruction logits.
 
 ## models/fusion.py
-* **EncoderFusion.__init__** – create two encoders and a cross‑attention fusion module.
-* **EncoderFusion.forward** – produce the fused representation for a pair of sequences.
+* **EncoderFusion.__init__** – create two encoders, per-sample cross-attention and projection head.
+* **EncoderFusion.forward** – return a `FusionOutput` with fused, cross-modal and reconstruction tensors.
+
+## train_new.py
+* **TwoStageTrainer** – two-stage curriculum alternating unsupervised and supervised batches.
+* **main** – command line entry for the streamlined training pipeline.
 
 ## models/losses.py
 * **hierarchical_contrastive_loss** – instance and temporal contrastive loss across multiple scales.
