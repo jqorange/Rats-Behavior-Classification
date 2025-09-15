@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
+
 from .dilated_conv import DilatedConvEncoder
-from .domain_adapter import DomainAdapter
 
 def check_nan(tensor: torch.Tensor, name: str):
     if torch.isnan(tensor).any():
@@ -12,20 +12,15 @@ def check_nan(tensor: torch.Tensor, name: str):
         raise ValueError(f"Inf found in {name}")
 
 class Encoder(nn.Module):
-    """
-    Adapter -> TCN -> head_cross
-      - z_self  : direct TCN output
-      - z_cross : prediction in the *other* modality space via a small GRU
-    NOTE: No self-attention here per requirement.
-    """
-    def __init__(self, N_feat, d_model=64, depth=3, dropout=0.1,
+    """Lightweight temporal encoder used for each modality."""
+
+    def __init__(self, N_feat: int, d_model: int = 64, depth: int = 3, dropout: float = 0.1,
                  num_sessions: int = 0):
         super().__init__()
         self.d_model = d_model
 
-        # Domain adapter (session-aware projection) as input stem
-        self.adapter = DomainAdapter(N_feat, d_model, num_sessions=num_sessions, dropout=dropout)
-        self.adapter.set_mode("none")
+        # Simple linear projection as input stem (session aware adapters removed)
+        self.input_proj = nn.Linear(N_feat, d_model)
         self.norm_in = nn.LayerNorm(d_model)
 
         # TCN encoder for local temporal context
@@ -33,15 +28,20 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm_tcn = nn.LayerNorm(d_model)
 
-        # GRU head for cross-modal prediction only
+        # GRU head for cross-modal prediction
         self.head_cross = nn.GRU(d_model, d_model, batch_first=True)
         self.norm_cross = nn.LayerNorm(d_model)
 
-    def forward(self, x: torch.Tensor, session_idx: torch.Tensor | None = None, mask=None):
+        # GRU based reconstruction head for the current modality
+        self.head_recon = nn.GRU(d_model, d_model, batch_first=True)
+        self.norm_recon = nn.LayerNorm(d_model)
+        self.recon_out = nn.Linear(d_model, N_feat)
+
+    def forward(self, x: torch.Tensor, session_idx: torch.Tensor | None = None, mask: torch.Tensor | None = None):
         """
         Args:
             x: [B, T, N_feat]
-            session_idx: [B] or [B, ...], optional for DomainAdapter
+            session_idx: unused placeholder for backward compatibility
             mask: [B, T] boolean, True = keep, False = mask (optional)
 
         Returns:
@@ -51,9 +51,9 @@ class Encoder(nn.Module):
         B, T, _ = x.shape
         check_nan(x, "input x")
 
-        # 1) Adapter
-        h = self.adapter(x, session_idx=session_idx)             # [B, T, D]
-        check_nan(h, "after adapter")
+        # 1) Input projection
+        h = self.input_proj(x)                                   # [B, T, D]
+        check_nan(h, "after input_proj")
         h = self.norm_in(h)
 
         # 2) Optional masking
@@ -72,7 +72,12 @@ class Encoder(nn.Module):
         z_self = h                                              # [B, T, D]
         z_cross, _ = self.head_cross(h.detach())
         z_cross = self.norm_cross(z_cross)                      # [B, T, D]
+        recon_h, _ = self.head_recon(h)
+        recon_h = self.norm_recon(recon_h)
+        x_recon = self.recon_out(recon_h)
+
         check_nan(z_self, "z_self")
         check_nan(z_cross, "z_cross")
+        check_nan(x_recon, "x_recon")
 
-        return z_self, z_cross
+        return z_self, z_cross, x_recon
