@@ -194,15 +194,12 @@ class TwoStageTrainer:
         if T <= 5:
             zero = imu.new_tensor(0.0)
             metrics = {
-                "loss_total": zero,
-                "loss_unsup": zero,
-                "loss_contrast": zero,
-                "loss_cs": zero,
-                "loss_align": zero,
-                "loss_recon": zero,
+                "align_l2": zero,
+                "reconstruction_l2": zero,
+                "unsupervised_contrastive": zero,
             }
             if prototypes is not None:
-                metrics["loss_proto"] = zero
+                metrics["prototype_loss"] = zero
             return None, metrics, None, None
 
         min_crop = 2 ** (self.temporal_unit + 1)
@@ -273,15 +270,12 @@ class TwoStageTrainer:
                 loss_total = loss_unsup
 
         metrics = {
-            "loss_total": loss_total.detach(),
-            "loss_unsup": loss_unsup.detach(),
-            "loss_contrast": loss_contrast.detach(),
-            "loss_cs": loss_cs.detach(),
-            "loss_align": loss_align.detach(),
-            "loss_recon": loss_recon.detach(),
+            "align_l2": loss_align.detach(),
+            "reconstruction_l2": loss_recon.detach(),
+            "unsupervised_contrastive": loss_contrast.detach(),
         }
         if proto_loss is not None:
-            metrics["loss_proto"] = proto_loss.detach()
+            metrics["prototype_loss"] = proto_loss.detach()
         return loss_total, metrics, pseudo_feats, pseudo_labels
 
     def _step_sup(self, batch: Dict[str, torch.Tensor]) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
@@ -337,11 +331,9 @@ class TwoStageTrainer:
             loss_total = loss_sup + loss_cs + loss_align + self.recon_weight * loss_recon
 
         metrics = {
-            "loss_total": loss_total.detach(),
-            "loss_sup": loss_sup.detach(),
-            "loss_cs": loss_cs.detach(),
-            "loss_align": loss_align.detach(),
-            "loss_recon": loss_recon.detach(),
+            "align_l2": loss_align.detach(),
+            "reconstruction_l2": loss_recon.detach(),
+            "supervised_contrastive": loss_sup.detach(),
         }
         return loss_total, metrics
 
@@ -353,6 +345,7 @@ class TwoStageTrainer:
         stage_name: str,
         prototypes: Optional[torch.Tensor],
         proto_weight: float,
+        include_supervised: bool,
     ) -> Tuple[Dict[str, float], List[torch.Tensor], List[torch.Tensor]]:
         self.model.train()
         stats: Dict[str, float] = defaultdict(float)
@@ -360,7 +353,10 @@ class TwoStageTrainer:
         pseudo_feats: List[torch.Tensor] = []
         pseudo_labels: List[torch.Tensor] = []
 
-        total_steps = max(len(unsup_batches), len(sup_batches))
+        if include_supervised:
+            total_steps = max(len(unsup_batches), len(sup_batches))
+        else:
+            total_steps = len(unsup_batches)
         if total_steps == 0:
             return {}, pseudo_feats, pseudo_labels
 
@@ -380,20 +376,53 @@ class TwoStageTrainer:
                 if feats is not None and pseudo is not None:
                     pseudo_feats.append(feats.detach())
                     pseudo_labels.append(pseudo.detach())
-                progress.set_postfix(unsup=float(metrics_u.get("loss_total", 0.0)))
+                progress.set_postfix(
+                    unsup_contrast=float(metrics_u.get("unsupervised_contrastive", 0.0))
+                )
 
-            if step < len(sup_batches):
+            if include_supervised and step < len(sup_batches):
                 loss_s, metrics_s = self._step_sup(sup_batches[step])
                 if loss_s is not None:
                     self._optimizer_step(loss_s)
                 self._record_metrics(stats, counts, metrics_s, prefix="sup_")
                 progress.set_postfix(
-                    unsup=float(stats.get("unsup_loss_total", 0.0) / max(counts.get("unsup_loss_total", 1), 1)),
-                    sup=float(metrics_s.get("loss_total", 0.0)),
+                    unsup_contrast=float(
+                        stats.get("unsup_unsupervised_contrastive", 0.0)
+                        / max(counts.get("unsup_unsupervised_contrastive", 1), 1)
+                    ),
+                    sup_contrast=float(metrics_s.get("supervised_contrastive", 0.0)),
                 )
 
-        averaged = {k: stats[k] / max(counts[k], 1) for k in stats}
-        return averaged, pseudo_feats, pseudo_labels
+        align_sum = stats.get("unsup_align_l2", 0.0) + stats.get("sup_align_l2", 0.0)
+        align_count = counts.get("unsup_align_l2", 0) + counts.get("sup_align_l2", 0)
+        recon_sum = stats.get("unsup_reconstruction_l2", 0.0) + stats.get("sup_reconstruction_l2", 0.0)
+        recon_count = counts.get("unsup_reconstruction_l2", 0) + counts.get("sup_reconstruction_l2", 0)
+        unsup_contrast_sum = stats.get("unsup_unsupervised_contrastive", 0.0)
+        unsup_contrast_count = counts.get("unsup_unsupervised_contrastive", 0)
+        sup_contrast_sum = stats.get("sup_supervised_contrastive", 0.0)
+        sup_contrast_count = counts.get("sup_supervised_contrastive", 0)
+        proto_sum = stats.get("unsup_prototype_loss", 0.0)
+        proto_count = counts.get("unsup_prototype_loss", 0)
+
+        final_metrics: Dict[str, float] = {}
+        final_metrics["alignL2_loss"] = align_sum / align_count if align_count > 0 else 0.0
+        final_metrics["reconstructionL2_loss"] = (
+            recon_sum / recon_count if recon_count > 0 else 0.0
+        )
+        final_metrics["unsupervised_contrastive_loss"] = (
+            unsup_contrast_sum / unsup_contrast_count if unsup_contrast_count > 0 else 0.0
+        )
+
+        if include_supervised:
+            final_metrics["supervised_contrastive_loss"] = (
+                sup_contrast_sum / sup_contrast_count if sup_contrast_count > 0 else 0.0
+            )
+        else:
+            final_metrics["prototype_loss"] = (
+                proto_sum / proto_count if proto_count > 0 else 0.0
+            )
+
+        return final_metrics, pseudo_feats, pseudo_labels
 
     def _log_epoch(self, stage_name: str, metrics: Dict[str, float]) -> None:
         ordered = " ".join(f"{k}={v:.4f}" for k, v in sorted(metrics.items()))
@@ -452,6 +481,7 @@ class TwoStageTrainer:
                 stage_name="Stage1",
                 prototypes=self.prototypes,
                 proto_weight=self.proto_weight,
+                include_supervised=False,
             )
             if pseudo_feats:
                 pf = torch.cat(pseudo_feats, dim=0)
@@ -515,6 +545,7 @@ class TwoStageTrainer:
                 stage_name="Stage2",
                 prototypes=None,
                 proto_weight=0.0,
+                include_supervised=True,
             )
             self.total_epochs += 1
             self._log_epoch("Stage2", metrics)
