@@ -237,10 +237,10 @@ class TwoStageTrainer:
             dlc_to_imu = out1.dlc_to_imu[:, -crop_l:]
 
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
-            loss_cs = gaussian_cs_divergence(imu_to_dlc, dlc_self.detach()) + gaussian_cs_divergence(dlc_to_imu, imu_self.detach())
+            loss_cs = gaussian_cs_divergence(imu_to_dlc, dlc_self) + gaussian_cs_divergence(dlc_to_imu, imu_self)
             loss_align = (
-                torch.norm(imu_to_dlc - dlc_self.detach(), dim=-1).mean()
-                + torch.norm(dlc_to_imu - imu_self.detach(), dim=-1).mean()
+                torch.norm(imu_to_dlc - dlc_self, dim=-1).mean()
+                + torch.norm(dlc_to_imu - imu_self, dim=-1).mean()
             )
 
             recon_a = out1.imu_recon[:, -crop_l:]
@@ -273,6 +273,7 @@ class TwoStageTrainer:
             "align_l2": loss_align.detach(),
             "reconstruction_l2": loss_recon.detach(),
             "unsupervised_contrastive": loss_contrast.detach(),
+            "cs_divergence": loss_cs.detach(),
         }
         if proto_loss is not None:
             metrics["prototype_loss"] = proto_loss.detach()
@@ -319,10 +320,10 @@ class TwoStageTrainer:
             emb = F.normalize(emb, dim=-1)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
-            loss_cs = gaussian_cs_divergence(out.imu_to_dlc, out.dlc_self.detach()) + gaussian_cs_divergence(out.dlc_to_imu, out.imu_self.detach())
+            loss_cs = gaussian_cs_divergence(out.imu_to_dlc, out.dlc_self) + gaussian_cs_divergence(out.dlc_to_imu, out.imu_self)
             loss_align = (
-                torch.norm(out.imu_to_dlc - out.dlc_self.detach(), dim=-1).mean()
-                + torch.norm(out.dlc_to_imu - out.imu_self.detach(), dim=-1).mean()
+                torch.norm(out.imu_to_dlc - out.dlc_self, dim=-1).mean()
+                + torch.norm(out.dlc_to_imu - out.imu_self, dim=-1).mean()
             )
             loss_recon = 0.5 * (
                 self._masked_l2(out.imu_recon, imu, mask)
@@ -334,6 +335,7 @@ class TwoStageTrainer:
             "align_l2": loss_align.detach(),
             "reconstruction_l2": loss_recon.detach(),
             "supervised_contrastive": loss_sup.detach(),
+            "cs_divergence": loss_cs.detach(),
         }
         return loss_total, metrics
 
@@ -401,6 +403,8 @@ class TwoStageTrainer:
         unsup_contrast_count = counts.get("unsup_unsupervised_contrastive", 0)
         sup_contrast_sum = stats.get("sup_supervised_contrastive", 0.0)
         sup_contrast_count = counts.get("sup_supervised_contrastive", 0)
+        cs_sum = stats.get("unsup_cs_divergence", 0.0) + stats.get("sup_cs_divergence", 0.0)
+        cs_count = counts.get("unsup_cs_divergence", 0) + counts.get("sup_cs_divergence", 0)
         proto_sum = stats.get("unsup_prototype_loss", 0.0)
         proto_count = counts.get("unsup_prototype_loss", 0)
 
@@ -412,6 +416,7 @@ class TwoStageTrainer:
         final_metrics["unsupervised_contrastive_loss"] = (
             unsup_contrast_sum / unsup_contrast_count if unsup_contrast_count > 0 else 0.0
         )
+        final_metrics["cs_divergence_loss"] = cs_sum / cs_count if cs_count > 0 else 0.0
 
         if include_supervised:
             final_metrics["supervised_contrastive_loss"] = (
