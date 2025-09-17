@@ -41,6 +41,7 @@ class TwoStageTrainer:
         device: Optional[str] = None,
         *,
         stage_lrs: Optional[Dict[int, float]] = None,
+        loss_weights: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.d_model = 64
@@ -60,8 +61,28 @@ class TwoStageTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         self.scaler = torch.amp.GradScaler("cuda", enabled=(self.device == "cuda"))
         self.temporal_unit = 3
-        self.recon_weight = 1.0
         self.proto_weight = 0.01
+        self.unsup_loss_weights = {
+            "contrast": 1.0,
+            "cs": 0.1,
+            "align": 0.1,
+            "recon": 0.1,
+        }
+        self.sup_loss_weights = {
+            "contrast": 1.0,
+            "cs": 0.1,
+            "align": 0.1,
+            "recon": 0.1,
+        }
+        if loss_weights:
+            unsup_cfg = loss_weights.get("unsup", {})
+            if "proto" in unsup_cfg:
+                self.proto_weight = float(unsup_cfg["proto"])
+            self.unsup_loss_weights.update(
+                {k: float(v) for k, v in unsup_cfg.items() if k != "proto"}
+            )
+            sup_cfg = loss_weights.get("sup", {})
+            self.sup_loss_weights.update({k: float(v) for k, v in sup_cfg.items()})
 
         self.total_epochs = 0
         self.current_stage = 1
@@ -254,7 +275,13 @@ class TwoStageTrainer:
                 + self._masked_l2(recon_b2, dlc_crop2[:, :crop_l])
             )
 
-            loss_unsup = loss_contrast + loss_cs + loss_align + self.recon_weight * loss_recon
+            unsup_w = self.unsup_loss_weights
+            loss_unsup = (
+                unsup_w.get("contrast", 1.0) * loss_contrast
+                + unsup_w.get("cs", 1.0) * loss_cs
+                + unsup_w.get("align", 1.0) * loss_align
+                + unsup_w.get("recon", 1.0) * loss_recon
+            )
 
             proto_loss = None
             pseudo_feats = None
@@ -329,7 +356,13 @@ class TwoStageTrainer:
                 self._masked_l2(out.imu_recon, imu, mask)
                 + self._masked_l2(out.dlc_recon, dlc, mask)
             )
-            loss_total = loss_sup + loss_cs + loss_align + self.recon_weight * loss_recon
+            sup_w = self.sup_loss_weights
+            loss_total = (
+                sup_w.get("contrast", 1.0) * loss_sup
+                + sup_w.get("cs", 1.0) * loss_cs
+                + sup_w.get("align", 1.0) * loss_align
+                + sup_w.get("recon", 1.0) * loss_recon
+            )
 
         metrics = {
             "align_l2": loss_align.detach(),
