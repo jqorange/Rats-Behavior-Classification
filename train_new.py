@@ -404,7 +404,10 @@ class TwoStageTrainer:
         pseudo_labels: List[torch.Tensor] = []
 
         if include_supervised:
-            total_steps = max(len(unsup_batches), len(sup_batches))
+            if len(unsup_batches) > 0:
+                total_steps = len(unsup_batches)
+            else:
+                total_steps = len(sup_batches)
         else:
             total_steps = len(unsup_batches)
         if total_steps == 0:
@@ -430,8 +433,12 @@ class TwoStageTrainer:
                     unsup_contrast=float(metrics_u.get("unsupervised_contrastive", 0.0))
                 )
 
-            if include_supervised and step < len(sup_batches):
-                loss_s, metrics_s = self._step_sup(sup_batches[step])
+            if include_supervised and sup_batches:
+                if step < len(sup_batches):
+                    sup_idx = step
+                else:
+                    sup_idx = int(np.random.randint(0, len(sup_batches)))
+                loss_s, metrics_s = self._step_sup(sup_batches[sup_idx])
                 if loss_s is not None:
                     self._optimizer_step(loss_s)
                 self._record_metrics(stats, counts, metrics_s, prefix="sup_")
