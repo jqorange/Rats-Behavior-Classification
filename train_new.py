@@ -631,7 +631,7 @@ class TwoStageTrainer:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume-epoch", type=int, default=0, help="Resume training from given epoch")
+    parser.add_argument("--resume-epoch", type=int, default=34, help="Resume training from given epoch")
     parser.add_argument("--lr-stage1", type=float, default=1e-4, help="Learning rate for stage 1")
     parser.add_argument("--lr-stage2", type=float, default=5e-5, help="Learning rate for stage 2")
     args = parser.parse_args()

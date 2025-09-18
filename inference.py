@@ -228,7 +228,7 @@ def run_inference(
 
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage2_epoch100.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage2_epoch37.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',

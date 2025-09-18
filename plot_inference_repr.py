@@ -227,12 +227,12 @@ if __name__ == "__main__":
         description="Plot inferred representations with optional evaluation"
     )
     parser.add_argument("--data_path", default="D:\Jiaqi\Datasets\Rats\TrainData_new", help="Base data path")
-    parser.add_argument("--sessions", nargs="+", default=["F6D5_outdoor_1"], help="Session names")
+    parser.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_2"], help="Session names")
     parser.add_argument(
         "--rep_dir", default="representations", help="Directory of .pt representation files"
     )
     parser.add_argument(
-        "--if_split", default=False, help="Use last 20% of labeled ranges"
+        "--if_split", default=True, help="Use last 20% of labeled ranges"
     )
     args = parser.parse_args()
     main(args)
