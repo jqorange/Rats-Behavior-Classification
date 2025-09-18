@@ -1,10 +1,10 @@
 # train_two_stage.py
 """Two-stage training script using the new window dataset.
 
-Stage 1 combines unsupervised contrastive objectives with prototype
-regularisation. Stage 2 continues joint training with alternating
-unsupervised and supervised batches. The original session-aware adapters
-and the previous stage 1 have been removed for a leaner workflow.
+Stage 1 focuses purely on unsupervised contrastive objectives. Stage 2
+continues joint training with alternating unsupervised and supervised
+batches. The original session-aware adapters and the previous stage 1
+have been removed for a leaner workflow.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import os
 from collections import defaultdict
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -25,7 +25,6 @@ from models.losses import (
     gaussian_kl_divergence_masked,
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
-    prototype_loss,
     sequential_next_step_nll,
 )
 from utils.checkpoint import load_checkpoint, save_checkpoint
@@ -63,7 +62,6 @@ class TwoStageTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         self.scaler = torch.amp.GradScaler("cuda", enabled=(self.device == "cuda"))
         self.temporal_unit = 3
-        self.proto_weight = 0.01
         self.unsup_loss_weights = {
             "contrast": 1.0,
             "kl": 0.1,
@@ -78,12 +76,9 @@ class TwoStageTrainer:
         }
         if loss_weights:
             unsup_cfg = loss_weights.get("unsup", {})
-            if "proto" in unsup_cfg:
-                self.proto_weight = float(unsup_cfg["proto"])
             unsup_updates = {
                 ("kl" if k == "cs" else k): float(v)
                 for k, v in unsup_cfg.items()
-                if k != "proto"
             }
             self.unsup_loss_weights.update(unsup_updates)
             sup_cfg = loss_weights.get("sup", {})
@@ -94,7 +89,6 @@ class TwoStageTrainer:
 
         self.total_epochs = 0
         self.current_stage = 1
-        self.prototypes: Optional[torch.Tensor] = None
         self.class_weights: Optional[torch.Tensor] = None
 
     # ------------------------------------------------------------------
@@ -155,48 +149,13 @@ class TwoStageTrainer:
             )
         )
 
-    def _compute_prototypes(
-        self,
-        batches: Iterable[Dict[str, torch.Tensor]],
-        extra_feats: Optional[torch.Tensor] = None,
-        extra_labels: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        feats, labels = [], []
-        self.model.eval()
-        with torch.no_grad():
-            for batch in batches:
-                imu = self._sanitize(batch["imu"].to(self.device))
-                dlc = self._sanitize(batch["dlc"].to(self.device))
-                mask = batch.get("mask")
-                if mask is not None:
-                    mask = mask.to(self.device)
-                output = self.model(imu, dlc, mask=mask)
-                pooled = output.fused.max(dim=1).values
-                feats.append(pooled)
-                labels.append(batch["label"].to(self.device).argmax(dim=1))
-        if extra_feats is not None and extra_labels is not None:
-            feats.append(extra_feats)
-            labels.append(extra_labels)
-        feats_cat = torch.cat(feats, dim=0)
-        labels_cat = torch.cat(labels, dim=0)
-        n_classes = int(labels_cat.max().item()) + 1
-        protos = []
-        for k in range(n_classes):
-            mask = labels_cat == k
-            protos.append(feats_cat[mask].mean(dim=0))
-        self.model.train()
-        return torch.stack(protos, dim=0)
-
     # ------------------------------------------------------------------
     # Training steps
     # ------------------------------------------------------------------
     def _step_unsup(
         self,
         batch: Dict[str, torch.Tensor],
-        *,
-        prototypes: Optional[torch.Tensor] = None,
-        proto_weight: float = 0.0,
-    ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
         imu = self._sanitize(batch["imu"].to(self.device))
         dlc = self._sanitize(batch["dlc"].to(self.device))
         mask = batch.get("mask")
@@ -216,9 +175,7 @@ class TwoStageTrainer:
                 "reconstruction_kl": zero,
                 "unsupervised_contrastive": zero,
             }
-            if prototypes is not None:
-                metrics["prototype_loss"] = zero
-            return None, metrics, None, None
+            return None, metrics
 
         min_crop = 2 ** (self.temporal_unit + 1)
         crop_l = np.random.randint(low=min_crop, high=T + 1)
@@ -289,18 +246,7 @@ class TwoStageTrainer:
                 + unsup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
-            proto_loss = None
-            pseudo_feats = None
-            pseudo_labels = None
-            if prototypes is not None:
-                full_out = self.model(imu, dlc, session_idx=session_idx, mask=mask)
-                proto_loss, feats, pseudo = prototype_loss(full_out.fused, prototypes)
-                if feats is not None and pseudo is not None:
-                    pseudo_feats = feats.detach()
-                    pseudo_labels = pseudo.detach()
-                loss_total = loss_unsup + proto_weight * proto_loss
-            else:
-                loss_total = loss_unsup
+            loss_total = loss_unsup
 
         metrics = {
             "align_nll": loss_align_nll.detach(),
@@ -309,9 +255,7 @@ class TwoStageTrainer:
             "reconstruction_kl": loss_recon_kl.detach(),
             "unsupervised_contrastive": loss_contrast.detach(),
         }
-        if proto_loss is not None:
-            metrics["prototype_loss"] = proto_loss.detach()
-        return loss_total, metrics, pseudo_feats, pseudo_labels
+        return loss_total, metrics
 
     def _step_sup(self, batch: Dict[str, torch.Tensor]) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
         imu = self._sanitize(batch["imu"].to(self.device))
@@ -393,15 +337,11 @@ class TwoStageTrainer:
         sup_batches: List[Dict[str, torch.Tensor]],
         *,
         stage_name: str,
-        prototypes: Optional[torch.Tensor],
-        proto_weight: float,
         include_supervised: bool,
-    ) -> Tuple[Dict[str, float], List[torch.Tensor], List[torch.Tensor]]:
+    ) -> Dict[str, float]:
         self.model.train()
         stats: Dict[str, float] = defaultdict(float)
         counts: Dict[str, int] = defaultdict(int)
-        pseudo_feats: List[torch.Tensor] = []
-        pseudo_labels: List[torch.Tensor] = []
 
         if include_supervised:
             if len(unsup_batches) > 0:
@@ -411,7 +351,7 @@ class TwoStageTrainer:
         else:
             total_steps = len(unsup_batches)
         if total_steps == 0:
-            return {}, pseudo_feats, pseudo_labels
+            return {}
 
         progress = tqdm(
             range(total_steps),
@@ -420,15 +360,10 @@ class TwoStageTrainer:
         )
         for step in progress:
             if step < len(unsup_batches):
-                loss_u, metrics_u, feats, pseudo = self._step_unsup(
-                    unsup_batches[step], prototypes=prototypes, proto_weight=proto_weight
-                )
+                loss_u, metrics_u = self._step_unsup(unsup_batches[step])
                 if loss_u is not None:
                     self._optimizer_step(loss_u)
                 self._record_metrics(stats, counts, metrics_u, prefix="unsup_")
-                if feats is not None and pseudo is not None:
-                    pseudo_feats.append(feats.detach())
-                    pseudo_labels.append(pseudo.detach())
                 progress.set_postfix(
                     unsup_contrast=float(metrics_u.get("unsupervised_contrastive", 0.0))
                 )
@@ -462,8 +397,6 @@ class TwoStageTrainer:
         unsup_contrast_count = counts.get("unsup_unsupervised_contrastive", 0)
         sup_contrast_sum = stats.get("sup_supervised_contrastive", 0.0)
         sup_contrast_count = counts.get("sup_supervised_contrastive", 0)
-        proto_sum = stats.get("unsup_prototype_loss", 0.0)
-        proto_count = counts.get("unsup_prototype_loss", 0)
 
         final_metrics: Dict[str, float] = {}
         final_metrics["alignNLL_loss"] = (
@@ -486,12 +419,8 @@ class TwoStageTrainer:
             final_metrics["supervised_contrastive_loss"] = (
                 sup_contrast_sum / sup_contrast_count if sup_contrast_count > 0 else 0.0
             )
-        else:
-            final_metrics["prototype_loss"] = (
-                proto_sum / proto_count if proto_count > 0 else 0.0
-            )
 
-        return final_metrics, pseudo_feats, pseudo_labels
+        return final_metrics
 
     def _log_epoch(self, stage_name: str, metrics: Dict[str, float]) -> None:
         ordered = " ".join(f"{k}={v:.4f}" for k, v in sorted(metrics.items()))
@@ -534,40 +463,12 @@ class TwoStageTrainer:
                 seed=42 + ep,
                 n_workers_preproc=n_workers_preproc,
             )
-            sup_batches = self._prepare_batches(
-                dataset,
-                batch_size,
-                out_dir="Dataset_sup",
-                use_unlabeled=False,
-                mix=True,
-                seed=42 + ep,
-                n_workers_preproc=n_workers_preproc,
-            )
-            use_prototypes = bool(getattr(dataset, "has_labels", False)) and bool(sup_batches)
-            if use_prototypes:
-                sample_label = sup_batches[0].get("label")
-                if sample_label is None or sample_label.numel() == 0:
-                    use_prototypes = False
-
-            if use_prototypes:
-                self.prototypes = self._compute_prototypes(sup_batches)
-            else:
-                self.prototypes = None
-
-            proto_weight = self.proto_weight if use_prototypes else 0.0
-
-            metrics, pseudo_feats, pseudo_labels = self._train_epoch(
+            metrics = self._train_epoch(
                 unsup_batches,
-                sup_batches,
+                [],
                 stage_name="Stage1",
-                prototypes=self.prototypes,
-                proto_weight=proto_weight,
                 include_supervised=False,
             )
-            if use_prototypes and pseudo_feats:
-                pf = torch.cat(pseudo_feats, dim=0)
-                pl = torch.cat(pseudo_labels, dim=0)
-                self.prototypes = self._compute_prototypes(sup_batches, pf, pl)
 
             self.total_epochs += 1
             self._log_epoch("Stage1", metrics)
@@ -620,12 +521,10 @@ class TwoStageTrainer:
                 n_workers_preproc=n_workers_preproc,
             )
 
-            metrics, _, _ = self._train_epoch(
+            metrics = self._train_epoch(
                 unsup_batches,
                 sup_batches,
                 stage_name="Stage2",
-                prototypes=None,
-                proto_weight=0.0,
                 include_supervised=True,
             )
             self.total_epochs += 1
@@ -697,7 +596,7 @@ def main() -> None:
     if start_stage <= 1:
         remaining1 = max(stage1_epochs - start_epoch, 0)
         if remaining1 > 0:
-            print(">>> Stage 1 (unsupervised + prototypes)...")
+            print(">>> Stage 1 (unsupervised)...")
             trainer.stage1(
                 train_ds,
                 batch_size,

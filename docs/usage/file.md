@@ -19,7 +19,7 @@
 * **deep_mlp.py** – deeper MLP used for representation level self training.
 * **domain_adapter.py** – small modules inserted before encoders to align or tag sessions.
 * **masking.py** – utilities to generate random temporal masks.
-* **losses.py** – contrastive and prototype loss implementations.
+* **losses.py** – contrastive and reconstruction loss implementations.
 
 ## Utilities (`utils/`)
 

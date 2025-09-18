@@ -45,20 +45,12 @@ Below is a high level summary of the public functions and class methods found in
 * **hierarchical_contrastive_loss** – instance and temporal contrastive loss across multiple scales.
 * **instance_contrastive_loss** – contrast between samples within the same batch.
 * **temporal_contrastive_loss** – contrast across time within each sequence.
-* **prototype_loss** – cross-entropy loss pulling features toward class prototypes.
 * **multilabel_supcon_loss_bt** – multi‑label supervised contrastive loss with pooling.
 * **compute_contrastive_losses** – dispatch supervised or unsupervised contrastive losses depending on stage.
 * **CenterLoss.__init__** – maintain class centroids.
 * **CenterLoss.forward** – compute distance from features to class centers.
 * **UncertaintyWeighting.__init__** – learn weights for combining multiple losses.
 * **UncertaintyWeighting.forward** – apply uncertainty weighting.
-* **PrototypeMemory.__init__** – store class prototypes used for pseudo labelling and set soft label temperature.
-* **PrototypeMemory.assign_labels** – assign pseudo labels based on cosine similarity.
-* **PrototypeMemory.soft_labels** – compute soft label distributions from prototypes (supports temperature sharpening).
-* **PrototypeMemory.update** – update prototypes using labelled or pseudo labelled features.
-* **PrototypeMemory.forward** – soft alignment loss between features and prototypes.
-* **prototype_repulsion_loss** – penalise similarity to incorrect prototypes. Supports soft labels.
-* **prototype_center_loss** – center loss computed using class prototypes. Supports soft labels.
 
 ## models/masking.py
 * **generate_continuous_mask** – drop contiguous blocks of frames.
