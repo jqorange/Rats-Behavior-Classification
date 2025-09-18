@@ -543,16 +543,28 @@ class TwoStageTrainer:
                 seed=42 + ep,
                 n_workers_preproc=n_workers_preproc,
             )
-            self.prototypes = self._compute_prototypes(sup_batches)
+            use_prototypes = bool(getattr(dataset, "has_labels", False)) and bool(sup_batches)
+            if use_prototypes:
+                sample_label = sup_batches[0].get("label")
+                if sample_label is None or sample_label.numel() == 0:
+                    use_prototypes = False
+
+            if use_prototypes:
+                self.prototypes = self._compute_prototypes(sup_batches)
+            else:
+                self.prototypes = None
+
+            proto_weight = self.proto_weight if use_prototypes else 0.0
+
             metrics, pseudo_feats, pseudo_labels = self._train_epoch(
                 unsup_batches,
                 sup_batches,
                 stage_name="Stage1",
                 prototypes=self.prototypes,
-                proto_weight=self.proto_weight,
+                proto_weight=proto_weight,
                 include_supervised=False,
             )
-            if pseudo_feats:
+            if use_prototypes and pseudo_feats:
                 pf = torch.cat(pseudo_feats, dim=0)
                 pl = torch.cat(pseudo_labels, dim=0)
                 self.prototypes = self._compute_prototypes(sup_batches, pf, pl)

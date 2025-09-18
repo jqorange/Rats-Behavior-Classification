@@ -65,6 +65,8 @@ class RatsWindowDataset(Dataset):
         # 全部帧的样本（用于无监督损失）
         self.unsup_samples: List[Tuple[str, torch.Tensor, int]] = []
         self.num_labels = 0
+        # 标记是否成功载入了任何标签文件
+        self.has_labels = False
 
         for session in self.sessions:
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features_madnorm.csv")
@@ -73,7 +75,7 @@ class RatsWindowDataset(Dataset):
 
             imu_df = pd.read_csv(imu_file, nrows=self.max_len_per_session)
             dlc_df = pd.read_csv(dlc_file, nrows=self.max_len_per_session)
-            label_df = pd.read_csv(label_file)
+            label_df = pd.read_csv(label_file) if os.path.exists(label_file) else None
 
             # 对齐长度
             min_len = min(len(imu_df), len(dlc_df))
@@ -82,41 +84,63 @@ class RatsWindowDataset(Dataset):
             self.data[session] = SessionData(imu=imu, dlc=dlc)
 
             # label: 只保留非全零
-            label_df = label_df[label_df.drop(columns=["Index"]).any(axis=1)]
-            label_df = label_df.sort_values("Index")
-            indices = label_df["Index"].to_numpy(dtype=int)
-            labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
-
-            # 标签数量（所有 session 应一致）
-            n_labels = labels.shape[1]
-            if not hasattr(self, "num_labels") or self.num_labels == 0:
-                self.num_labels = n_labels
-            else:
-                assert n_labels == self.num_labels, "Inconsistent number of labels"
             zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
+            if label_df is not None:
+                self.has_labels = True
+                label_df = label_df[label_df.drop(columns=["Index"]).any(axis=1)]
+                label_df = label_df.sort_values("Index")
+                indices = label_df["Index"].to_numpy(dtype=int)
+                labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
 
-            # 限制在最大长度范围内
-            m_valid = indices < min_len
-            indices = indices[m_valid]
-            labels = labels[m_valid]
+                if labels.size:
+                    n_labels = labels.shape[1]
+                    if self.num_labels == 0:
+                        self.num_labels = n_labels
+                        zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
+                        if self.unsup_samples:
+                            self.unsup_samples = [
+                                (sess, zero_label, centre)
+                                for sess, _, centre in self.unsup_samples
+                            ]
+                    else:
+                        assert n_labels == self.num_labels, "Inconsistent number of labels"
+                        zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
 
-            # 可选限制范围
-            if session in self.session_ranges:
-                start, end = self.session_ranges[session]
-                m = (indices >= start) & (indices < end)
-                indices = indices[m]
-                labels = labels[m]
+                    # 限制在最大长度范围内
+                    m_valid = indices < min_len
+                    indices = indices[m_valid]
+                    labels = labels[m_valid]
 
-            # 80/20 split
-            n_train = int(len(indices) * 0.8)
-            if split == "train":
-                idx_split = slice(0, n_train)
-            else:
-                idx_split = slice(n_train, None)
+                    # 可选限制范围
+                    if session in self.session_ranges:
+                        start, end = self.session_ranges[session]
+                        m = (indices >= start) & (indices < end)
+                        indices = indices[m]
+                        labels = labels[m]
 
-            for centre, lab in zip(indices[idx_split], labels[idx_split]):
-                lab_tensor = torch.from_numpy(lab)
-                self.samples.append((session, lab_tensor, int(centre)))
+                    # 80/20 split
+                    n_train = int(len(indices) * 0.8)
+                    if split == "train":
+                        idx_split = slice(0, n_train)
+                    else:
+                        idx_split = slice(n_train, None)
+
+                    for centre, lab in zip(indices[idx_split], labels[idx_split]):
+                        lab_tensor = torch.from_numpy(lab)
+                        self.samples.append((session, lab_tensor, int(centre)))
+                elif self.num_labels == 0:
+                    # 没有有效标签行，但依然记录类别数量以保持张量尺寸一致
+                    n_labels = (
+                        len(label_df.columns) - 1 if "Index" in label_df.columns else label_df.shape[1]
+                    )
+                    if n_labels > 0:
+                        self.num_labels = n_labels
+                        zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
+                        if self.unsup_samples:
+                            self.unsup_samples = [
+                                (sess, zero_label, centre)
+                                for sess, _, centre in self.unsup_samples
+                            ]
 
             # 生成无监督样本：覆盖所有帧
             n_total = min_len
