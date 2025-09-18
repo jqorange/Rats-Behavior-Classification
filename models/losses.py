@@ -148,44 +148,6 @@ def temporal_contrastive_loss(z1, z2):
     return loss
 
 
-def prototype_loss(z, prototypes, labels=None, threshold: float = 0.9):
-    """Cross-entropy loss between features and class prototypes.
-
-    When ``labels`` is ``None`` pseudo labels are inferred from the
-    highest-similarity prototype.  Only samples with similarity above
-    ``threshold`` contribute to the loss and are returned for optional
-    prototype updates.
-
-    Args:
-        z: ``(B, T, D)`` feature tensor.
-        prototypes: ``(C, D)`` prototype tensor.
-        labels: Optional ``(B,)`` class indices.
-        threshold: confidence required for pseudo labels.
-
-    Returns:
-        If ``labels`` is provided, returns a scalar loss.  Otherwise
-        returns ``(loss, feats, pseudo)`` where ``feats`` and ``pseudo``
-        are the pooled features and assigned labels for high-confidence
-        samples.
-    """
-
-    B, T, D = z.shape
-    feats = F.max_pool1d(z.transpose(1, 2), kernel_size=T).squeeze(-1)
-    feats = F.normalize(feats, dim=-1)
-    prototypes = F.normalize(prototypes, dim=-1)
-    logits = torch.matmul(feats, prototypes.T)
-
-    if labels is not None:
-        return F.cross_entropy(logits, labels)
-
-    max_sims, pseudo = logits.max(dim=1)
-    mask = max_sims > threshold
-    if mask.any():
-        loss = F.cross_entropy(logits[mask], pseudo[mask])
-        return loss, feats[mask].detach(), pseudo[mask].detach()
-    return feats.new_tensor(0.0), None, None
-
-
 def sequential_next_step_nll(
     prediction: torch.Tensor,
     target: torch.Tensor,
