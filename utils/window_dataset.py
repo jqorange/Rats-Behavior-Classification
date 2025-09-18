@@ -1,12 +1,12 @@
 import os
-import random
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple, Optional
 
-import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+
+from .segments import SegmentInfo, SegmentKey, compute_segments, extract_label_arrays, split_segments_by_action
 
 
 @dataclass
@@ -47,6 +47,9 @@ class RatsWindowDataset(Dataset):
         split: str = "train",
         session_ranges: Optional[Dict[str, Tuple[int, int]]] = None,
         max_len_per_session: int = 150_000,
+        *,
+        test_ratio: float = 0.2,
+        split_seed: int = 0,
     ) -> None:
         super().__init__()
         assert split in {"train", "test"}
@@ -55,6 +58,8 @@ class RatsWindowDataset(Dataset):
         self.split = split
         self.session_ranges = session_ranges or {}
         self.max_len_per_session = max_len_per_session
+        self.test_ratio = float(test_ratio)
+        self.split_seed = int(split_seed)
 
         # map session names to consecutive indices
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
@@ -65,8 +70,12 @@ class RatsWindowDataset(Dataset):
         # 全部帧的样本（用于无监督损失）
         self.unsup_samples: List[Tuple[str, torch.Tensor, int]] = []
         self.num_labels = 0
+        self.label_columns: List[str] = []
         # 标记是否成功载入了任何标签文件
         self.has_labels = False
+
+        session_segments: Dict[str, Dict[str, List[SegmentInfo]]] = {}
+        session_label_arrays: Dict[str, torch.Tensor] = {}
 
         for session in self.sessions:
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features_madnorm.csv")
@@ -86,16 +95,18 @@ class RatsWindowDataset(Dataset):
             # label: 只保留非全零
             zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
             if label_df is not None:
-                self.has_labels = True
-                label_df = label_df[label_df.drop(columns=["Index"]).any(axis=1)]
-                label_df = label_df.sort_values("Index")
-                indices = label_df["Index"].to_numpy(dtype=int)
-                labels = label_df.drop(columns=["Index"]).to_numpy(dtype=np.float32)
+                indices, labels_np, columns = extract_label_arrays(
+                    label_df,
+                    label_columns=self.label_columns or None,
+                    max_index=min_len,
+                    session_range=self.session_ranges.get(session),
+                )
 
-                if labels.size:
-                    n_labels = labels.shape[1]
+                if labels_np.size:
+                    n_labels = labels_np.shape[1]
                     if self.num_labels == 0:
                         self.num_labels = n_labels
+                        self.label_columns = columns
                         zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
                         if self.unsup_samples:
                             self.unsup_samples = [
@@ -103,38 +114,21 @@ class RatsWindowDataset(Dataset):
                                 for sess, _, centre in self.unsup_samples
                             ]
                     else:
-                        assert n_labels == self.num_labels, "Inconsistent number of labels"
+                        if n_labels != self.num_labels:
+                            raise ValueError("Inconsistent number of label columns across sessions")
                         zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
 
-                    # 限制在最大长度范围内
-                    m_valid = indices < min_len
-                    indices = indices[m_valid]
-                    labels = labels[m_valid]
-
-                    # 可选限制范围
-                    if session in self.session_ranges:
-                        start, end = self.session_ranges[session]
-                        m = (indices >= start) & (indices < end)
-                        indices = indices[m]
-                        labels = labels[m]
-
-                    # 80/20 split
-                    n_train = int(len(indices) * 0.8)
-                    if split == "train":
-                        idx_split = slice(0, n_train)
-                    else:
-                        idx_split = slice(n_train, None)
-
-                    for centre, lab in zip(indices[idx_split], labels[idx_split]):
-                        lab_tensor = torch.from_numpy(lab)
-                        self.samples.append((session, lab_tensor, int(centre)))
+                    labels_tensor = torch.from_numpy(labels_np)
+                    session_label_arrays[session] = labels_tensor
+                    segs = compute_segments(indices, labels_np, self.label_columns)
+                    if any(segs.values()):
+                        session_segments[session] = segs
+                        self.has_labels = True
                 elif self.num_labels == 0:
-                    # 没有有效标签行，但依然记录类别数量以保持张量尺寸一致
-                    n_labels = (
-                        len(label_df.columns) - 1 if "Index" in label_df.columns else label_df.shape[1]
-                    )
+                    n_labels = labels_np.shape[1]
                     if n_labels > 0:
                         self.num_labels = n_labels
+                        self.label_columns = columns
                         zero_label = torch.zeros(self.num_labels, dtype=torch.float32)
                         if self.unsup_samples:
                             self.unsup_samples = [
@@ -152,6 +146,21 @@ class RatsWindowDataset(Dataset):
                 unsup_end = min(unsup_end, end)
             for c in range(unsup_start, unsup_end):
                 self.unsup_samples.append((session, zero_label, int(c)))
+
+        if session_segments:
+            assignments = split_segments_by_action(
+                session_segments, test_ratio=self.test_ratio, seed=self.split_seed
+            )
+            for session, per_action in session_segments.items():
+                labels_tensor = session_label_arrays.get(session)
+                if labels_tensor is None:
+                    continue
+                for action, segs in per_action.items():
+                    for seg in segs:
+                        key = SegmentKey(session=session, action=action, start=seg.start, end=seg.end)
+                        if key in assignments.get(self.split, set()):
+                            lab_tensor = labels_tensor[seg.label_row].clone()
+                            self.samples.append((session, lab_tensor, int(seg.centre)))
 
     def __len__(self) -> int:
         return len(self.samples)

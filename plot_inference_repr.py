@@ -1,6 +1,7 @@
 import argparse
 import os
 from collections import defaultdict
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,13 @@ from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
+from utils.segments import (
+    SegmentInfo,
+    collect_segment_centres,
+    compute_segments,
+    extract_label_arrays,
+    split_segments_by_action,
+)
 
 
 LABEL_COLUMNS = [
@@ -25,24 +33,6 @@ LABEL_COLUMNS = [
     "turn_left",
     "turn_right",
 ]
-
-
-def load_label_ranges(results_txt_path: str):
-    """Load labeled index ranges from results.txt."""
-    session_ranges = {}
-    with open(results_txt_path, "r") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            parts = line.strip().split("\t")
-            csv_path, range_str = parts[0], parts[1]
-            session_name = os.path.basename(csv_path).replace("label_", "").replace(
-                ".csv", ""
-            )
-            ranges = eval(range_str)
-            session_ranges[session_name] = ranges
-    return session_ranges
-
 
 def compute_cluster_metrics(data_pca, labels):
     """Compute clustering quality metrics for labeled data."""
@@ -101,10 +91,35 @@ def main(args: argparse.Namespace) -> None:
     rep_list = []
     label_list = []
 
-    label_ranges = {}
+    split_centres: Dict[str, List[int]] = {}
     if args.if_split:
-        label_ranges = load_label_ranges(
-            os.path.join(args.data_path, "labels", "results.txt")
+        segments_by_session: Dict[str, Dict[str, List[SegmentInfo]]] = {}
+        label_columns_ref: Optional[List[str]] = None
+        for sess in args.sessions:
+            label_file = os.path.join(args.data_path, "labels", sess, f"label_{sess}.csv")
+            if not os.path.exists(label_file):
+                segments_by_session[sess] = {}
+                continue
+
+            label_df = pd.read_csv(label_file)
+            indices, labels_arr, label_cols = extract_label_arrays(
+                label_df, label_columns=label_columns_ref
+            )
+            if label_columns_ref is None and label_cols:
+                label_columns_ref = label_cols
+            elif label_columns_ref is not None and label_cols and label_cols != label_columns_ref:
+                raise ValueError("Label columns mismatch across sessions")
+
+            columns_for_session = label_cols if label_cols else (label_columns_ref or [])
+            segments_by_session[sess] = compute_segments(
+                indices, labels_arr, columns_for_session
+            )
+
+        assignments = split_segments_by_action(
+            segments_by_session, test_ratio=args.segment_test_ratio, seed=args.split_seed
+        )
+        split_centres = collect_segment_centres(
+            segments_by_session, assignments, args.segment_split
         )
 
     for sess in args.sessions:
@@ -126,18 +141,17 @@ def main(args: argparse.Namespace) -> None:
             reps = reps[mask]
             labels = labels_all[centers]
 
-            if args.if_split and sess in label_ranges:
-                pos = []
-                for start, end in label_ranges[sess]:
-                    idx = np.where((centers >= start) & (centers < end))[0]
-                    pos.extend(idx.tolist())
-                if not pos:
-                    print(f"[WARN] No labeled range for session {sess}")
+            if args.if_split:
+                keep_centres = set(split_centres.get(sess, []))
+                if not keep_centres:
+                    print(f"[WARN] No selected segments for session {sess}")
                     continue
-                split_start = int(0.8 * len(pos))
-                sel = pos[split_start:]
-                labels = labels[sel]
-                reps = reps[sel]
+                mask = np.isin(centers, list(keep_centres))
+                if not mask.any():
+                    print(f"[WARN] Selected centres not present in representations for {sess}")
+                    continue
+                labels = labels[mask]
+                reps = reps[mask]
 
             label_list.append(labels)
         rep_list.append(reps)
@@ -232,7 +246,16 @@ if __name__ == "__main__":
         "--rep_dir", default="representations", help="Directory of .pt representation files"
     )
     parser.add_argument(
-        "--if_split", default=True, help="Use last 20% of labeled ranges"
+        "--if_split", action="store_true", help="Restrict to selected segment split"
+    )
+    parser.add_argument(
+        "--segment_split", choices=["train", "test"], default="test", help="Segment split to visualise"
+    )
+    parser.add_argument(
+        "--split_seed", type=int, default=0, help="Random seed for segment splitting"
+    )
+    parser.add_argument(
+        "--segment_test_ratio", type=float, default=0.2, help="Test ratio for segment splitting"
     )
     args = parser.parse_args()
     main(args)

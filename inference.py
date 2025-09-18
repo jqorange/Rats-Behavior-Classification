@@ -1,6 +1,6 @@
 import os
 import argparse
-from typing import Sequence, List, Optional
+from typing import Dict, Sequence, List, Optional
 
 import torch
 import pandas as pd
@@ -8,6 +8,13 @@ import numpy as np
 
 from models.fusion import EncoderFusion
 from utils.checkpoint import load_checkpoint
+from utils.segments import (
+    SegmentInfo,
+    collect_segment_centres,
+    compute_segments,
+    extract_label_arrays,
+    split_segments_by_action,
+)
 
 
 def _infer_model_config(state: dict[str, torch.Tensor]) -> tuple[int, int]:
@@ -98,13 +105,11 @@ def _collect_centers_full(length: int, stride: int = 1) -> List[int]:
     return list(range(0, length, stride))
 
 
-def _collect_centers_labeled(label_df: pd.DataFrame) -> List[int]:
-    label_df = label_df[label_df.drop(columns=['Index']).any(axis=1)]
-    label_df = label_df.sort_values('Index')
-    indices = label_df['Index'].to_numpy(dtype=int)
-    n = len(indices)
-    start = int(n * 0.8)
-    return indices[start:].tolist()
+def _load_label_dataframe(root: str, session: str) -> Optional[pd.DataFrame]:
+    label_file = os.path.join(root, 'labels', session, f'label_{session}.csv')
+    if not os.path.exists(label_file):
+        return None
+    return pd.read_csv(label_file)
 
 
 @torch.no_grad()
@@ -121,6 +126,9 @@ def run_inference(
     batch_size: int = 128,
     stride: int = 1,             # 滑动步长，默认逐帧
     fuse_mode: str = 'both',     # 'imu', 'dlc', or 'both'
+    segment_split: str = 'test',
+    segment_seed: int = 0,
+    segment_test_ratio: float = 0.2,
 ) -> None:
     """Generate representations for sessions using a saved checkpoint.
 
@@ -171,13 +179,42 @@ def run_inference(
         Ts = [64]
         base_stride = stride
 
+    segments_by_session: Dict[str, Dict[str, List[SegmentInfo]]] = {}
+    labelled_centres: Dict[str, List[int]] = {}
+    if mode == 'labeled':
+        segment_split = segment_split.lower()
+        if segment_split not in {'train', 'test'}:
+            raise ValueError("segment_split must be either 'train' or 'test'")
+
+        label_columns_ref: Optional[List[str]] = None
+        for sess in sessions:
+            label_df = _load_label_dataframe(data_path, sess)
+            if label_df is None:
+                raise FileNotFoundError(f'Label file missing for session {sess}')
+            indices, labels_arr, label_cols = extract_label_arrays(
+                label_df, label_columns=label_columns_ref
+            )
+            if label_columns_ref is None and label_cols:
+                label_columns_ref = label_cols
+            elif label_columns_ref is not None and label_cols and label_cols != label_columns_ref:
+                raise ValueError('Label columns mismatch across sessions')
+
+            columns_for_session = label_cols if label_cols else (label_columns_ref or [])
+            segs = compute_segments(indices, labels_arr, columns_for_session)
+            segments_by_session[sess] = segs
+
+        assignments = split_segments_by_action(
+            segments_by_session, test_ratio=segment_test_ratio, seed=segment_seed
+        )
+        labelled_centres = collect_segment_centres(
+            segments_by_session, assignments, segment_split
+        )
+
     for sess in sessions:
         imu, dlc, label_df = _load_session_arrays(data_path, sess)
         length = min(len(imu), len(dlc))
         if mode == 'labeled':
-            if label_df is None:
-                raise FileNotFoundError(f'Label file missing for session {sess}')
-            centres = _collect_centers_labeled(label_df)
+            centres = [c for c in labelled_centres.get(sess, []) if c < length]
         else:
             centres = _collect_centers_full(length, stride=base_stride)
 
@@ -243,6 +280,11 @@ def main() -> None:
     p.add_argument('--stride', type=int, default=1, help='Sliding stride for centers (1 = per frame)')
     p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='both',
                    help='Cross-attention mode during inference')
+    p.add_argument('--segment-split', choices=['train', 'test'], default='test',
+                   help='Use training or testing segments when mode="labeled"')
+    p.add_argument('--split-seed', type=int, default=0, help='Random seed for segment splitting')
+    p.add_argument('--segment-test-ratio', type=float, default=0.2,
+                   help='Test ratio for segment-level splitting')
     args = p.parse_args()
 
     run_inference(
@@ -257,6 +299,9 @@ def main() -> None:
         batch_size=args.batch_size,
         stride=args.stride,
         fuse_mode=args.fuse_mode,
+        segment_split=args.segment_split,
+        segment_seed=args.split_seed,
+        segment_test_ratio=args.segment_test_ratio,
     )
 
 
