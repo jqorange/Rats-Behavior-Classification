@@ -119,7 +119,7 @@ def main(args: argparse.Namespace) -> None:
             segments_by_session, test_ratio=args.segment_test_ratio, seed=args.split_seed
         )
         split_centres = collect_segment_centres(
-            segments_by_session, assignments, args.segment_split
+            segments_by_session, assignments, args.segment_split, include="all"
         )
 
     for sess in args.sessions:

@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, List, Sequence, Tuple, Optional
 
+import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
@@ -76,6 +77,7 @@ class RatsWindowDataset(Dataset):
 
         session_segments: Dict[str, Dict[str, List[SegmentInfo]]] = {}
         session_label_arrays: Dict[str, torch.Tensor] = {}
+        session_label_lookup: Dict[str, Dict[int, int]] = {}
 
         for session in self.sessions:
             imu_file = os.path.join(root, "IMU", session, f"{session}_IMU_features_madnorm.csv")
@@ -120,6 +122,9 @@ class RatsWindowDataset(Dataset):
 
                     labels_tensor = torch.from_numpy(labels_np)
                     session_label_arrays[session] = labels_tensor
+                    session_label_lookup[session] = {
+                        int(idx): pos for pos, idx in enumerate(indices.tolist())
+                    }
                     segs = compute_segments(indices, labels_np, self.label_columns)
                     if any(segs.values()):
                         session_segments[session] = segs
@@ -153,14 +158,19 @@ class RatsWindowDataset(Dataset):
             )
             for session, per_action in session_segments.items():
                 labels_tensor = session_label_arrays.get(session)
-                if labels_tensor is None:
+                index_lookup = session_label_lookup.get(session)
+                if labels_tensor is None or index_lookup is None:
                     continue
                 for action, segs in per_action.items():
                     for seg in segs:
                         key = SegmentKey(session=session, action=action, start=seg.start, end=seg.end)
                         if key in assignments.get(self.split, set()):
-                            lab_tensor = labels_tensor[seg.label_row].clone()
-                            self.samples.append((session, lab_tensor, int(seg.centre)))
+                            for frame_idx in range(int(seg.start), int(seg.end) + 1):
+                                row_idx = index_lookup.get(frame_idx)
+                                if row_idx is None:
+                                    continue
+                                lab_tensor = labels_tensor[row_idx].clone()
+                                self.samples.append((session, lab_tensor, int(frame_idx)))
 
     def __len__(self) -> int:
         return len(self.samples)

@@ -188,8 +188,30 @@ def collect_segment_centres(
     split: str,
     *,
     deduplicate: bool = True,
+    include: str = "centre",
 ) -> Dict[str, List[int]]:
-    """Return centre indices per session for the requested split."""
+    """Return frame indices per session for the requested split.
+
+    Parameters
+    ----------
+    segments_by_session:
+        Mapping from session name to behaviour segments.
+    assignments:
+        Train/test split assignments returned by :func:`split_segments_by_action`.
+    split:
+        Which split to extract (``"train"`` or ``"test"``).
+    deduplicate:
+        When ``True`` the collected indices are deduplicated and returned in
+        ascending order.
+    include:
+        ``"centre"`` keeps the historical behaviour of returning each segment's
+        centre index.  ``"all"`` returns every frame covered by the selected
+        segments.
+    """
+
+    include = include.lower()
+    if include not in {"centre", "all"}:
+        raise ValueError("include must be either 'centre' or 'all'")
 
     selected = assignments.get(split, set())
     centres_per_session: Dict[str, List[int]] = {}
@@ -200,7 +222,10 @@ def collect_segment_centres(
             for seg in segs:
                 key = SegmentKey(session=session, action=action, start=seg.start, end=seg.end)
                 if key in selected:
-                    centres.append(int(seg.centre))
+                    if include == "centre":
+                        centres.append(int(seg.centre))
+                    else:  # include == "all"
+                        centres.extend(range(int(seg.start), int(seg.end) + 1))
         if deduplicate:
             centres = sorted(set(centres))
         else:
