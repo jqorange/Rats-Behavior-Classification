@@ -1,3 +1,6 @@
+import math
+from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -38,42 +41,6 @@ def _chol_logdet(C: torch.Tensor, base_eps: float = 1e-6, tries: int = 5):
     return None, logabsdet
 
 
-def gaussian_cs_divergence(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Gaussian Cauchy–Schwarz divergence with covariance shrinkage."""
-
-    with torch.cuda.amp.autocast(enabled=False):
-        x = _flatten_bt(x).float()
-        y = _flatten_bt(y).float()
-
-        if x.size(0) == 0 or y.size(0) == 0:
-            device = x.device if x.numel() > 0 else y.device
-            return torch.tensor(0.0, device=device)
-
-        d = x.size(-1)
-        mu_x = x.mean(dim=0, keepdim=True)
-        mu_y = y.mean(dim=0, keepdim=True)
-
-        Cx = _shrink(_cov(x), lam=0.1)
-        Cy = _shrink(_cov(y), lam=0.1)
-        S = Cx + Cy
-
-        Lx, logdet_x = _chol_logdet(Cx, base_eps=eps)
-        Ly, logdet_y = _chol_logdet(Cy, base_eps=eps)
-        LS, logdet_S = _chol_logdet(S, base_eps=eps)
-
-        delta = (mu_x - mu_y).T
-        if LS is not None:
-            v = torch.cholesky_solve(delta, LS)
-            quad = (delta * v).sum()
-        else:
-            Sinv = torch.linalg.pinvh(S)
-            quad = (delta.T @ (Sinv @ delta)).squeeze()
-
-        const = -0.5 * d * torch.log(torch.tensor(2.0, dtype=S.dtype, device=S.device))
-        divergence = const - 0.25 * logdet_x - 0.25 * logdet_y + 0.5 * logdet_S + 0.5 * quad
-        return divergence
-
-
 def gaussian_kl_divergence(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """Covariance-regularised KL divergence under Gaussian assumption."""
 
@@ -106,6 +73,31 @@ def gaussian_kl_divergence(p: torch.Tensor, q: torch.Tensor, eps: float = 1e-6) 
         d = p.size(-1)
         kl = 0.5 * (logdet_q - logdet_p - d + trace_term + quad)
         return kl
+
+
+def gaussian_kl_divergence_masked(
+    p: torch.Tensor, q: torch.Tensor, mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    """KL divergence that only considers entries where ``mask`` is valid."""
+
+    if mask is None:
+        return gaussian_kl_divergence(p, q)
+
+    mask_f = mask.to(p.device)
+    if mask_f.dtype != torch.bool:
+        mask_f = mask_f > 0.5
+    mask_flat = mask_f.reshape(-1)
+    if mask_flat.sum() == 0:
+        return p.new_tensor(0.0)
+
+    p_flat = p.reshape(-1, p.size(-1))
+    q_flat = q.reshape(-1, q.size(-1))
+    p_sel = p_flat[mask_flat]
+    q_sel = q_flat[mask_flat]
+    if p_sel.numel() == 0 or q_sel.numel() == 0:
+        return p.new_tensor(0.0)
+
+    return gaussian_kl_divergence(p_sel, q_sel)
 def hierarchical_contrastive_loss(z1, z2, alpha=0.5, temporal_unit=3):
     loss = torch.tensor(0., device=z1.device)
     d = 0
@@ -192,6 +184,42 @@ def prototype_loss(z, prototypes, labels=None, threshold: float = 0.9):
         loss = F.cross_entropy(logits[mask], pseudo[mask])
         return loss, feats[mask].detach(), pseudo[mask].detach()
     return feats.new_tensor(0.0), None, None
+
+
+def sequential_next_step_nll(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute next-step Gaussian NLL optionally restricted by a mask."""
+
+    if prediction.size(1) < 2 or target.size(1) < 2:
+        return prediction.new_tensor(0.0)
+
+    pred_curr = prediction[:, :-1]
+    target_next = target[:, 1:]
+    diff = target_next - pred_curr
+    log_const = prediction.new_tensor(0.5 * math.log(2.0 * math.pi), dtype=prediction.dtype)
+    nll = 0.5 * diff.pow(2) + log_const
+
+    if mask is None:
+        return nll.mean()
+
+    mask_curr = mask[:, :-1]
+    mask_next = mask[:, 1:]
+    if mask_curr.dtype != torch.bool:
+        mask_curr = mask_curr > 0.5
+    if mask_next.dtype != torch.bool:
+        mask_next = mask_next > 0.5
+    mask_valid = mask_curr & mask_next
+    valid_count = mask_valid.sum()
+    if valid_count.item() == 0:
+        return prediction.new_tensor(0.0)
+
+    nll = nll * mask_valid.unsqueeze(-1)
+    denom = valid_count * prediction.size(-1)
+    denom = denom.to(nll.dtype)
+    return nll.sum() / denom
 
 def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
     B, T, D = z.shape

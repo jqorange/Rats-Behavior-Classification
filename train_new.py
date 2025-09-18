@@ -22,9 +22,11 @@ from tqdm import tqdm
 from models.fusion import EncoderFusion
 from models.losses import (
     gaussian_kl_divergence,
+    gaussian_kl_divergence_masked,
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
     prototype_loss,
+    sequential_next_step_nll,
 )
 from utils.checkpoint import load_checkpoint, save_checkpoint
 from utils.preprocess import load_preprocessed_batches, preprocess_dataset
@@ -104,41 +106,6 @@ class TwoStageTrainer:
 
     def _sanitize(self, t: torch.Tensor) -> torch.Tensor:
         return torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0)
-
-    def _masked_mse(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        diff = (pred - target) ** 2
-        if mask is not None:
-            mask_f = mask.to(pred.device, dtype=pred.dtype)
-            while mask_f.dim() < diff.dim():
-                mask_f = mask_f.unsqueeze(-1)
-            diff = diff * mask_f
-            denom = mask_f.sum() * target.size(-1)
-            if denom.item() == 0:
-                return diff.new_tensor(0.0)
-            return diff.sum() / denom
-        return diff.mean()
-
-    def _kl_with_mask(
-        self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if mask is None:
-            return gaussian_kl_divergence(pred, target)
-        mask_f = mask.to(pred.device)
-        if mask_f.dtype != torch.bool:
-            mask_f = mask_f > 0.5
-        mask_flat = mask_f.reshape(-1)
-        if mask_flat.sum() == 0:
-            return pred.new_tensor(0.0)
-        pred_flat = pred.reshape(-1, pred.size(-1))
-        target_flat = target.reshape(-1, target.size(-1))
-        pred_sel = pred_flat[mask_flat]
-        target_sel = target_flat[mask_flat]
-        if pred_sel.numel() == 0 or target_sel.numel() == 0:
-            return pred.new_tensor(0.0)
-        return gaussian_kl_divergence(pred_sel, target_sel)
 
     def _optimizer_step(self, loss: torch.Tensor) -> None:
         if loss is None:
@@ -243,9 +210,9 @@ class TwoStageTrainer:
         if T <= 5:
             zero = imu.new_tensor(0.0)
             metrics = {
-                "align_mse": zero,
+                "align_nll": zero,
                 "align_kl": zero,
-                "reconstruction_mse": zero,
+                "reconstruction_nll": zero,
                 "reconstruction_kl": zero,
                 "unsupervised_contrastive": zero,
             }
@@ -288,9 +255,9 @@ class TwoStageTrainer:
             dlc_to_imu = out1.dlc_to_imu[:, -crop_l:]
 
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
-            loss_align_mse = 0.5 * (
-                F.mse_loss(imu_to_dlc, dlc_self)
-                + F.mse_loss(dlc_to_imu, imu_self)
+            loss_align_nll = 0.5 * (
+                sequential_next_step_nll(imu_to_dlc, dlc_self)
+                + sequential_next_step_nll(dlc_to_imu, imu_self)
             )
             loss_align_kl = 0.5 * (
                 gaussian_kl_divergence(imu_to_dlc, dlc_self)
@@ -301,11 +268,11 @@ class TwoStageTrainer:
             recon_b = out1.dlc_recon[:, -crop_l:]
             recon_a2 = out2.imu_recon[:, :crop_l]
             recon_b2 = out2.dlc_recon[:, :crop_l]
-            loss_recon_mse = 0.25 * (
-                self._masked_mse(recon_a, imu_crop1[:, -crop_l:])
-                + self._masked_mse(recon_b, dlc_crop1[:, -crop_l:])
-                + self._masked_mse(recon_a2, imu_crop2[:, :crop_l])
-                + self._masked_mse(recon_b2, dlc_crop2[:, :crop_l])
+            loss_recon_nll = 0.25 * (
+                sequential_next_step_nll(recon_a, imu_crop1[:, -crop_l:])
+                + sequential_next_step_nll(recon_b, dlc_crop1[:, -crop_l:])
+                + sequential_next_step_nll(recon_a2, imu_crop2[:, :crop_l])
+                + sequential_next_step_nll(recon_b2, dlc_crop2[:, :crop_l])
             )
             loss_recon_kl = 0.25 * (
                 gaussian_kl_divergence(recon_a, imu_crop1[:, -crop_l:])
@@ -317,9 +284,9 @@ class TwoStageTrainer:
             unsup_w = self.unsup_loss_weights
             loss_unsup = (
                 unsup_w.get("contrast", 1.0) * loss_contrast
-                + unsup_w.get("align", 1.0) * loss_align_mse
+                + unsup_w.get("align", 1.0) * loss_align_nll
                 + unsup_w.get("kl", 1.0) * loss_align_kl
-                + unsup_w.get("recon", 1.0) * (loss_recon_mse + loss_recon_kl)
+                + unsup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
             proto_loss = None
@@ -336,9 +303,9 @@ class TwoStageTrainer:
                 loss_total = loss_unsup
 
         metrics = {
-            "align_mse": loss_align_mse.detach(),
+            "align_nll": loss_align_nll.detach(),
             "align_kl": loss_align_kl.detach(),
-            "reconstruction_mse": loss_recon_mse.detach(),
+            "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "unsupervised_contrastive": loss_contrast.detach(),
         }
@@ -387,34 +354,34 @@ class TwoStageTrainer:
             emb = F.normalize(emb, dim=-1)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
-            loss_align_mse = 0.5 * (
-                F.mse_loss(out.imu_to_dlc, out.dlc_self)
-                + F.mse_loss(out.dlc_to_imu, out.imu_self)
+            loss_align_nll = 0.5 * (
+                sequential_next_step_nll(out.imu_to_dlc, out.dlc_self)
+                + sequential_next_step_nll(out.dlc_to_imu, out.imu_self)
             )
             loss_align_kl = 0.5 * (
                 gaussian_kl_divergence(out.imu_to_dlc, out.dlc_self)
                 + gaussian_kl_divergence(out.dlc_to_imu, out.imu_self)
             )
-            loss_recon_mse = 0.5 * (
-                self._masked_mse(out.imu_recon, imu, mask)
-                + self._masked_mse(out.dlc_recon, dlc, mask)
+            loss_recon_nll = 0.5 * (
+                sequential_next_step_nll(out.imu_recon, imu, mask)
+                + sequential_next_step_nll(out.dlc_recon, dlc, mask)
             )
             loss_recon_kl = 0.5 * (
-                self._kl_with_mask(out.imu_recon, imu, mask)
-                + self._kl_with_mask(out.dlc_recon, dlc, mask)
+                gaussian_kl_divergence_masked(out.imu_recon, imu, mask)
+                + gaussian_kl_divergence_masked(out.dlc_recon, dlc, mask)
             )
             sup_w = self.sup_loss_weights
             loss_total = (
                 sup_w.get("contrast", 1.0) * loss_sup
-                + sup_w.get("align", 1.0) * loss_align_mse
+                + sup_w.get("align", 1.0) * loss_align_nll
                 + sup_w.get("kl", 1.0) * loss_align_kl
-                + sup_w.get("recon", 1.0) * (loss_recon_mse + loss_recon_kl)
+                + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
         metrics = {
-            "align_mse": loss_align_mse.detach(),
+            "align_nll": loss_align_nll.detach(),
             "align_kl": loss_align_kl.detach(),
-            "reconstruction_mse": loss_recon_mse.detach(),
+            "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "supervised_contrastive": loss_sup.detach(),
         }
@@ -476,12 +443,12 @@ class TwoStageTrainer:
                     sup_contrast=float(metrics_s.get("supervised_contrastive", 0.0)),
                 )
 
-        align_mse_sum = stats.get("unsup_align_mse", 0.0) + stats.get("sup_align_mse", 0.0)
-        align_mse_count = counts.get("unsup_align_mse", 0) + counts.get("sup_align_mse", 0)
+        align_nll_sum = stats.get("unsup_align_nll", 0.0) + stats.get("sup_align_nll", 0.0)
+        align_nll_count = counts.get("unsup_align_nll", 0) + counts.get("sup_align_nll", 0)
         align_kl_sum = stats.get("unsup_align_kl", 0.0) + stats.get("sup_align_kl", 0.0)
         align_kl_count = counts.get("unsup_align_kl", 0) + counts.get("sup_align_kl", 0)
-        recon_mse_sum = stats.get("unsup_reconstruction_mse", 0.0) + stats.get("sup_reconstruction_mse", 0.0)
-        recon_mse_count = counts.get("unsup_reconstruction_mse", 0) + counts.get("sup_reconstruction_mse", 0)
+        recon_nll_sum = stats.get("unsup_reconstruction_nll", 0.0) + stats.get("sup_reconstruction_nll", 0.0)
+        recon_nll_count = counts.get("unsup_reconstruction_nll", 0) + counts.get("sup_reconstruction_nll", 0)
         recon_kl_sum = stats.get("unsup_reconstruction_kl", 0.0) + stats.get("sup_reconstruction_kl", 0.0)
         recon_kl_count = counts.get("unsup_reconstruction_kl", 0) + counts.get("sup_reconstruction_kl", 0)
         unsup_contrast_sum = stats.get("unsup_unsupervised_contrastive", 0.0)
@@ -492,14 +459,14 @@ class TwoStageTrainer:
         proto_count = counts.get("unsup_prototype_loss", 0)
 
         final_metrics: Dict[str, float] = {}
-        final_metrics["alignMSE_loss"] = (
-            align_mse_sum / align_mse_count if align_mse_count > 0 else 0.0
+        final_metrics["alignNLL_loss"] = (
+            align_nll_sum / align_nll_count if align_nll_count > 0 else 0.0
         )
         final_metrics["alignKL_loss"] = (
             align_kl_sum / align_kl_count if align_kl_count > 0 else 0.0
         )
-        final_metrics["reconstructionMSE_loss"] = (
-            recon_mse_sum / recon_mse_count if recon_mse_count > 0 else 0.0
+        final_metrics["reconstructionNLL_loss"] = (
+            recon_nll_sum / recon_nll_count if recon_nll_count > 0 else 0.0
         )
         final_metrics["reconstructionKL_loss"] = (
             recon_kl_sum / recon_kl_count if recon_kl_count > 0 else 0.0
