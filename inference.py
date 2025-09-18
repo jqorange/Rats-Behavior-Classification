@@ -180,7 +180,7 @@ def run_inference(
         base_stride = stride
 
     segments_by_session: Dict[str, Dict[str, List[SegmentInfo]]] = {}
-    labelled_centres: Dict[str, List[int]] = {}
+    labelled_indices: Dict[str, List[int]] = {}
     if mode == 'labeled':
         segment_split = segment_split.lower()
         if segment_split not in {'train', 'test'}:
@@ -206,15 +206,15 @@ def run_inference(
         assignments = split_segments_by_action(
             segments_by_session, test_ratio=segment_test_ratio, seed=segment_seed
         )
-        labelled_centres = collect_segment_centres(
-            segments_by_session, assignments, segment_split
+        labelled_indices = collect_segment_centres(
+            segments_by_session, assignments, segment_split, include='all'
         )
 
     for sess in sessions:
         imu, dlc, label_df = _load_session_arrays(data_path, sess)
         length = min(len(imu), len(dlc))
         if mode == 'labeled':
-            centres = [c for c in labelled_centres.get(sess, []) if c < length]
+            centres = [c for c in labelled_indices.get(sess, []) if c < length]
         else:
             centres = _collect_centers_full(length, stride=base_stride)
 
