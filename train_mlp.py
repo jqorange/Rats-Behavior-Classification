@@ -1,6 +1,7 @@
 import os
 import argparse
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 import torch
@@ -8,9 +9,10 @@ from torch.utils.data import Dataset, DataLoader
 import torch.nn as nn
 import torch.nn.functional as F
 import pandas as pd
-from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+from sklearn.metrics import precision_recall_fscore_support
 
 from models.deep_mlp import DeepMLPClassifier
+from utils.segments import collect_segment_centres, compute_segments, split_segments_by_action
 
 # ------------------------------
 # 全局行为类别
@@ -47,6 +49,17 @@ class ReprDataset(Dataset):
 
 
 # ------------------------------
+# Session container for splits
+# ------------------------------
+@dataclass
+class SessionSplitData:
+    features: torch.Tensor
+    index_to_row: Dict[int, int]
+    label_lookup: Dict[int, int]
+    label_vectors: torch.Tensor
+
+
+# ------------------------------
 # Label helper
 # ------------------------------
 def _row_to_behavior_vector(row: pd.Series, present_cols: List[str]) -> torch.Tensor:
@@ -59,39 +72,45 @@ def _row_to_behavior_vector(row: pd.Series, present_cols: List[str]) -> torch.Te
     return torch.from_numpy(vec)
 
 
-def _load_session_split(repr_path: str, label_path: str, train: bool):
-    """每个 session 内部 80/20 拆分"""
-    data = torch.load(repr_path)
-    feats: torch.Tensor = data["features"]
-    centres = data.get("centers", list(range(len(feats))))
-    index_to_row = {int(c): i for i, c in enumerate(centres)}
+def _collect_split_tensors(
+    session_data: Dict[str, SessionSplitData],
+    segments_by_session: Dict[str, Dict[str, List]],
+    assignments: Dict[str, Set],
+    split: str,
+    feature_dim: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    frames_per_session = collect_segment_centres(
+        segments_by_session,
+        assignments,
+        split,
+        deduplicate=True,
+        include="all",
+    )
 
-    label_df = pd.read_csv(label_path)
-    valid_behavior_cols = [c for c in BEHAVIORS if c in label_df.columns]
-    label_df = label_df[["Index"] + valid_behavior_cols]
+    feat_list: List[torch.Tensor] = []
+    label_list: List[torch.Tensor] = []
 
-    if len(valid_behavior_cols) == 0:
-        return torch.empty(0, feats.shape[1]), torch.empty(0, len(BEHAVIORS))
-
-    label_df = label_df[label_df[valid_behavior_cols].sum(axis=1) > 0]
-    label_df = label_df.sort_values("Index")
-
-    n = len(label_df)
-    split = int(n * 0.8)
-    part = label_df.iloc[:split] if train else label_df.iloc[split:]
-
-    feat_list, label_list = [], []
-    for _, row in part.iterrows():
-        idx = int(row["Index"])
-        if idx not in index_to_row:
+    for session, frames in frames_per_session.items():
+        data = session_data.get(session)
+        if data is None:
             continue
-        feat_list.append(feats[index_to_row[idx]])
-        label_list.append(_row_to_behavior_vector(row, valid_behavior_cols))
+        for frame_idx in frames:
+            idx_feature = data.index_to_row.get(int(frame_idx))
+            if idx_feature is None:
+                continue
+            idx_label = data.label_lookup.get(int(frame_idx))
+            if idx_label is None:
+                continue
+            feat_list.append(data.features[idx_feature].clone())
+            label_list.append(data.label_vectors[idx_label].clone())
 
     if feat_list:
         return torch.stack(feat_list), torch.stack(label_list)
-    else:
-        return torch.empty(0, feats.shape[1]), torch.empty(0, len(BEHAVIORS))
+
+    return (
+        torch.empty((0, feature_dim), dtype=torch.float32),
+        torch.empty((0, len(BEHAVIORS)), dtype=torch.float32),
+    )
 
 
 # ------------------------------
@@ -251,22 +270,87 @@ def main():
     p.add_argument("--ckpt_dir", default="checkpoints_selftrain")
     p.add_argument("--rounds", type=int, default=5)
     p.add_argument("--epochs", type=int, default=80)
+    p.add_argument("--test-ratio", type=float, default=0.2, help="Fraction of segments reserved for validation/testing")
+    p.add_argument("--split-seed", type=int, default=0, help="Random seed for segment-level train/test split")
     args = p.parse_args()
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
 
-    # === 读取初始数据 ===
-    train_feats, train_labels, val_feats, val_labels = [], [], [], []
+    # === 读取初始数据并按照段落划分 ===
+    session_data: Dict[str, SessionSplitData] = {}
+    segments_by_session: Dict[str, Dict[str, List]] = {}
+
     for sess in args.sessions:
         repr_path = os.path.join(args.repr_dir, f"{sess}.pt")
-        label_path = os.path.join(args.label_dir, sess, f"label_{sess}.csv")
-        feats_tr, labs_tr = _load_session_split(repr_path, label_path, train=True)
-        feats_va, labs_va = _load_session_split(repr_path, label_path, train=False)
-        if len(feats_tr): train_feats.append(feats_tr); train_labels.append(labs_tr)
-        if len(feats_va): val_feats.append(feats_va); val_labels.append(labs_va)
+        if not os.path.exists(repr_path):
+            print(f"[!] Representation file missing for session {sess}, skipping")
+            continue
 
-    train_feats, train_labels = torch.cat(train_feats), torch.cat(train_labels)
-    val_feats, val_labels = torch.cat(val_feats), torch.cat(val_labels)
+        data = torch.load(repr_path)
+        feats: torch.Tensor = data["features"].float()
+        centres = data.get("centers", list(range(len(feats))))
+        index_to_row = {int(c): i for i, c in enumerate(centres)}
+
+        label_path = os.path.join(args.label_dir, sess, f"label_{sess}.csv")
+        if not os.path.exists(label_path):
+            print(f"[!] Label file missing for session {sess}, skipping")
+            continue
+
+        label_df = pd.read_csv(label_path)
+        valid_behavior_cols = [c for c in BEHAVIORS if c in label_df.columns]
+        if not valid_behavior_cols:
+            print(f"[!] No recognised behavior columns in labels for session {sess}, skipping")
+            continue
+
+        label_df = label_df[["Index"] + valid_behavior_cols]
+        label_df = label_df[label_df[valid_behavior_cols].sum(axis=1) > 0]
+        label_df = label_df.sort_values("Index").reset_index(drop=True)
+        if label_df.empty:
+            print(f"[!] No positive labels remaining for session {sess}, skipping")
+            continue
+
+        indices = label_df["Index"].astype(int).to_numpy()
+        label_array = label_df[valid_behavior_cols].to_numpy(dtype=np.float32)
+        segments_by_session[sess] = compute_segments(indices, label_array, valid_behavior_cols)
+        label_lookup = {int(idx): pos for pos, idx in enumerate(indices.tolist())}
+        label_vectors = torch.stack(
+            [_row_to_behavior_vector(row, valid_behavior_cols) for _, row in label_df.iterrows()]
+        )
+
+        session_data[sess] = SessionSplitData(
+            features=feats,
+            index_to_row=index_to_row,
+            label_lookup=label_lookup,
+            label_vectors=label_vectors,
+        )
+
+    if not session_data or not segments_by_session:
+        raise RuntimeError("No labelled segments found for the provided sessions")
+
+    feature_dim = next(iter(session_data.values())).features.shape[1]
+    assignments = split_segments_by_action(
+        segments_by_session,
+        test_ratio=args.test_ratio,
+        seed=args.split_seed,
+    )
+
+    train_feats, train_labels = _collect_split_tensors(
+        session_data,
+        segments_by_session,
+        assignments,
+        "train",
+        feature_dim,
+    )
+    val_feats, val_labels = _collect_split_tensors(
+        session_data,
+        segments_by_session,
+        assignments,
+        "test",
+        feature_dim,
+    )
+
+    if len(train_feats) == 0 or len(val_feats) == 0:
+        raise RuntimeError("Empty train or validation split after segment assignment")
     # === 统计测试集各动作的样本数量 ===
     val_counts = val_labels.sum(dim=0).long().cpu().numpy()
     print("\n[Test set behavior counts]")
