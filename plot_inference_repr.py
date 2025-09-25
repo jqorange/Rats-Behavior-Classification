@@ -246,7 +246,7 @@ if __name__ == "__main__":
         "--rep_dir", default="representations", help="Directory of .pt representation files"
     )
     parser.add_argument(
-        "--if_split", action="store_true", help="Restrict to selected segment split"
+        "--if_split", default=False, help="Restrict to selected segment split"
     )
     parser.add_argument(
         "--segment_split", choices=["train", "test"], default="test", help="Segment split to visualise"
@@ -255,7 +255,7 @@ if __name__ == "__main__":
         "--split_seed", type=int, default=0, help="Random seed for segment splitting"
     )
     parser.add_argument(
-        "--segment_test_ratio", type=float, default=0.2, help="Test ratio for segment splitting"
+        "--segment_test_ratio", type=float, default=0.8, help="Test ratio for segment splitting"
     )
     args = parser.parse_args()
     main(args)

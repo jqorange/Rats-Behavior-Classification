@@ -32,7 +32,6 @@ BEHAVIORS = [
     "turn_right",
 ]
 
-
 # ------------------------------
 # Dataset 封装
 # ------------------------------
@@ -47,7 +46,6 @@ class ReprDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.features[idx], self.labels[idx]
 
-
 # ------------------------------
 # Session container for splits
 # ------------------------------
@@ -57,7 +55,6 @@ class SessionSplitData:
     index_to_row: Dict[int, int]
     label_lookup: Dict[int, int]
     label_vectors: torch.Tensor
-
 
 # ------------------------------
 # Label helper
@@ -70,7 +67,6 @@ def _row_to_behavior_vector(row: pd.Series, present_cols: List[str]) -> torch.Te
         else:
             vec[k] = 0.0
     return torch.from_numpy(vec)
-
 
 def _collect_split_tensors(
     session_data: Dict[str, SessionSplitData],
@@ -112,7 +108,6 @@ def _collect_split_tensors(
         torch.empty((0, len(BEHAVIORS)), dtype=torch.float32),
     )
 
-
 # ------------------------------
 # Mixup 平衡
 # ------------------------------
@@ -121,7 +116,6 @@ def mixup(x1, y1, x2, y2, alpha=0.4):
     x_mix = lam * x1 + (1 - lam) * x2
     y_mix = torch.maximum(y1, y2)
     return x_mix, y_mix
-
 
 def balance_with_mixup(train_x, train_y, alpha=0.4, max_ratio=0.2, tag="train"):
     if len(train_x) == 0:
@@ -167,7 +161,6 @@ def balance_with_mixup(train_x, train_y, alpha=0.4, max_ratio=0.2, tag="train"):
 
     return train_x, train_y
 
-
 # ------------------------------
 # Focal Loss
 # ------------------------------
@@ -186,11 +179,35 @@ class FocalLoss(nn.Module):
         loss = focal_weight * bce_loss
         return loss.mean() if self.reduction == "mean" else loss.sum()
 
+# ------------------------------
+# Utils: 载入初始权重
+# ------------------------------
+def load_initial_weights(model: nn.Module, ckpt_path: str, device: str = "cpu", strict: bool = False):
+    if not ckpt_path or not os.path.exists(ckpt_path):
+        print(f"[init] No initial weights loaded (path not provided or not found).")
+        return
+    print(f"[init] Loading initial weights from: {ckpt_path}")
+    ckpt = torch.load(ckpt_path, map_location=device)
+    # 既支持纯 state_dict，也支持包含 'state_dict' / 'model' 的 checkpoint
+    if isinstance(ckpt, dict) and any(k in ckpt for k in ["state_dict", "model", "model_state_dict"]):
+        state_dict = ckpt.get("state_dict", ckpt.get("model", ckpt.get("model_state_dict")))
+    else:
+        state_dict = ckpt
+    missing, unexpected = model.load_state_dict(state_dict, strict=strict)
+    # 当 strict=False 时，这里返回的是 IncompatibleKeys 对象
+    if hasattr(missing, "__len__") and hasattr(unexpected, "__len__"):
+        if len(missing) or len(unexpected):
+            print(f"[init] Loaded with non-strict mode. missing_keys={len(missing)}, unexpected_keys={len(unexpected)}")
+            if len(missing) > 0:
+                print("         missing_keys(sample):", list(missing)[:10])
+            if len(unexpected) > 0:
+                print("         unexpected_keys(sample):", list(unexpected)[:10])
+    print("[init] Initial weights loaded.")
 
 # ------------------------------
 # Training + Pseudo-labeling
 # ------------------------------
-def train_one_round(model, train_loader, val_loader, loss_fn, opt, device, epochs, ckpt_dir, round_idx):
+def train_one_round(model, train_loader, val_loader, loss_fn, opt, device, epochs, ckpt_save_dir, round_idx):
     metrics_per_epoch = []
     best_macroF1 = -1.0
     best_state = None
@@ -223,8 +240,12 @@ def train_one_round(model, train_loader, val_loader, loss_fn, opt, device, epoch
         all_labels = torch.cat(all_labels, dim=0).numpy()
         all_probs = torch.cat(all_probs, dim=0)
 
-        precision, recall, f1, _ = precision_recall_fscore_support(all_labels, all_preds, average=None, zero_division=0)
-        _, _, f1_macro, _ = precision_recall_fscore_support(all_labels, all_preds, average="macro", zero_division=0)
+        precision, recall, f1, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average=None, zero_division=0
+        )
+        _, _, f1_macro, _ = precision_recall_fscore_support(
+            all_labels, all_preds, average="macro", zero_division=0
+        )
 
         metrics_df = pd.DataFrame({
             "round": round_idx,
@@ -255,26 +276,36 @@ def train_one_round(model, train_loader, val_loader, loss_fn, opt, device, epoch
             all_labels_best.append(y.cpu())
     all_probs_best = torch.cat(all_probs_best, dim=0)
     all_labels_best = torch.cat(all_labels_best, dim=0)
-
+    ckpt_path = os.path.join(ckpt_save_dir, f"round{round_idx}_best.pth")
+    torch.save(best_state, ckpt_path)
+    print(f"[Round {round_idx}] Best model saved to {ckpt_path}")
     return pd.concat(metrics_per_epoch, ignore_index=True), all_probs_best, all_labels_best
 
-
+# ------------------------------
+# Main
+# ------------------------------
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--repr_dir", default="./representations")
     p.add_argument("--label_dir", default=r"D:\Jiaqi\Datasets\Rats\TrainData_new\labels")
-    p.add_argument("--sessions", nargs="+", default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor","F6D5_outdoor_2"])
+    p.add_argument("--sessions", nargs="+", default=["F6D5_outdoor_1"])
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--batch_size", type=int, default=512)
-    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--batch_size", type=int, default=64)
+    p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--ckpt_dir", default="checkpoints_selftrain")
-    p.add_argument("--rounds", type=int, default=5)
-    p.add_argument("--epochs", type=int, default=80)
-    p.add_argument("--test-ratio", type=float, default=0.2, help="Fraction of segments reserved for validation/testing")
+    p.add_argument("--rounds", type=int, default=2)
+    p.add_argument("--epochs", type=int, default=120)
+    p.add_argument("--test-ratio", type=float, default=0.8, help="Fraction of segments reserved for validation/testing")
     p.add_argument("--split-seed", type=int, default=0, help="Random seed for segment-level train/test split")
+    # 新增：开训时载入的权重
+    p.add_argument("--init-weights", type=str, default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints_mlp\round1_best.pth", help="Path to initial weights (.pth). Loaded at Round 1 start.")
+    # 可选：严格匹配
+    p.add_argument("--strict-load", default=True, help="Use strict=True when loading init weights.")
     args = p.parse_args()
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
+    ckpt_save_dir = "checkpoints_mlp"
+    os.makedirs(ckpt_save_dir, exist_ok=True)
 
     # === 读取初始数据并按照段落划分 ===
     session_data: Dict[str, SessionSplitData] = {}
@@ -351,28 +382,38 @@ def main():
 
     if len(train_feats) == 0 or len(val_feats) == 0:
         raise RuntimeError("Empty train or validation split after segment assignment")
+
     # === 统计测试集各动作的样本数量 ===
     val_counts = val_labels.sum(dim=0).long().cpu().numpy()
     print("\n[Test set behavior counts]")
     for beh, c in zip(BEHAVIORS, val_counts):
         print(f"{beh:12s}: {c}")
     print(f"Total test samples = {len(val_labels)}\n")
+
     all_metrics = []
     for r in range(1, args.rounds + 1):
         print(f"\n===== Round {r} start =====")
         # === 平衡真实标签（轻量 mixup） ===
-        train_feats, train_labels = balance_with_mixup(train_feats, train_labels, max_ratio=0.3, tag=f"Round{r}-real")
+        train_feats, train_labels = balance_with_mixup(train_feats, train_labels, max_ratio=0.4, tag=f"Round{r}-real")
 
         # 模型
         model = DeepMLPClassifier(input_dim=train_feats.shape[1], output_dim=len(BEHAVIORS)).to(args.device)
+
+        # 仅在 Round 1 开始时加载初始权重
+        if r == 1 and args.init_weights:
+            load_initial_weights(model, args.init_weights, device=args.device, strict=args.strict_load)
+
         opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-        loss_fn = FocalLoss(alpha=0.15, gamma=3)
+        loss_fn = FocalLoss(alpha=0.15, gamma=3.5)
 
         train_loader = DataLoader(ReprDataset(train_feats, train_labels), batch_size=args.batch_size, shuffle=True)
         val_loader = DataLoader(ReprDataset(val_feats, val_labels), batch_size=args.batch_size)
 
         # 训练一轮
-        metrics_df, val_probs_best, val_labels_best = train_one_round(model, train_loader, val_loader, loss_fn, opt, args.device, args.epochs, args.ckpt_dir, r)
+        metrics_df, val_probs_best, val_labels_best = train_one_round(
+            model, train_loader, val_loader, loss_fn, opt, args.device,
+            args.epochs, ckpt_save_dir, r
+        )
         all_metrics.append(metrics_df)
 
         # === 保存每轮预测结果 ===
@@ -383,15 +424,14 @@ def main():
         df_preds.to_csv(os.path.join(args.ckpt_dir, f"preds_round{r}.csv"), index=False)
         print(f"[Round {r}] Validation predictions saved to preds_round{r}.csv")
 
-        # === 伪标签 ===
         # === 伪标签（类别自适应阈值） ===
         val_counts = val_labels_best.sum(dim=0).cpu().numpy()
         thresholds = []
         for beh, cnt in zip(BEHAVIORS, val_counts):
             if cnt < 5000:  # 少样本类，阈值放宽
-                thresholds.append(0.99)
-            else:  # 多样本类，阈值严格
                 thresholds.append(0.999)
+            else:          # 多样本类，阈值严格
+                thresholds.append(0.9999)
 
         thresholds = torch.tensor(thresholds).view(1, -1)  # shape=(1,n_classes)
         pseudo_mask = (val_probs_best > thresholds).float()
@@ -399,12 +439,11 @@ def main():
             print(f"[Round {r}] Added {int(pseudo_mask.sum().item())} pseudo-labels (best macroF1 model)")
             new_feats = torch.cat([train_feats, val_feats], dim=0)
             new_labels = torch.cat([train_labels, pseudo_mask], dim=0)
-            train_feats, train_labels = balance_with_mixup(new_feats, new_labels, max_ratio=0.2, tag=f"Round{r}-pseudo")
+            train_feats, train_labels = balance_with_mixup(new_feats, new_labels, max_ratio=0.25, tag=f"Round{r}-pseudo")
 
     final_df = pd.concat(all_metrics, ignore_index=True)
     final_df.to_csv(os.path.join(args.ckpt_dir, "selftrain_metrics.csv"), index=False)
     print("[✔] Training finished, metrics saved.")
-
 
 if __name__ == "__main__":
     main()

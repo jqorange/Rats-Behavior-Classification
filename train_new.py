@@ -542,7 +542,7 @@ class TwoStageTrainer:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume-epoch", type=int, default=34, help="Resume training from given epoch")
+    parser.add_argument("--resume-epoch", type=int, default=0, help="Resume training from given epoch")
     parser.add_argument("--lr-stage1", type=float, default=1e-4, help="Learning rate for stage 1")
     parser.add_argument("--lr-stage2", type=float, default=5e-5, help="Learning rate for stage 2")
     parser.add_argument("--split-seed", type=int, default=0, help="Random seed for segment-level train/test split")
@@ -558,6 +558,7 @@ def main() -> None:
         sessions,
         split="train",
         session_ranges=session_ranges,
+        test_ratio = 0.8,
         split_seed=args.split_seed,
     )
 
@@ -575,7 +576,7 @@ def main() -> None:
     n_workers_preproc = 1
 
     stage1_epochs = 30
-    stage2_epochs = 60
+    stage2_epochs = 200
 
     start_epoch = args.resume_epoch
     start_stage = 1

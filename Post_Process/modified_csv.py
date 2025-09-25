@@ -27,7 +27,7 @@ def modify_all_labels(session_names, behavior_names, input_dir="../prediction_pr
         df = pd.read_csv(input_path)
 
         for name in behavior_names:
-            df[name] = smooth_behavior_column(df[name], min_duration=5)
+            df[name] = smooth_behavior_column(df[name], min_duration=10)
 
         # 不用重写 Index，除非真的需要
         df.to_csv(output_path, index=False)

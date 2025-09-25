@@ -265,11 +265,11 @@ def run_inference(
 
 def main() -> None:
     p = argparse.ArgumentParser(description='Run encoder inference on sessions.')
-    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage2_epoch37.pt",
+    p.add_argument('--weights', default=r"D:\Jiaqi\Projects\Rats-Behavior-Classification\checkpoints\stage2_epoch199.pt",
                    help='Checkpoint file path')
     p.add_argument('--data_path', default=r"D:\Jiaqi\Datasets\Rats\TrainData_new", help='Dataset root directory')
     p.add_argument('--sessions', nargs='+',
-                   default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_2", "F6D5_outdoor_1"],
+                   default=["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_1", "F6D5_outdoor_2"],
                    help='Session names')
     p.add_argument('--mode', choices=['full', 'labeled'], default='full')
     p.add_argument('--window', choices=['64', 'multi'], default='multi')

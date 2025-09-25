@@ -14,14 +14,14 @@ def threshold(session_name):
     # -----------------------------------------
     # Step 1: 第一轮 - 基础阈值二值化
     # -----------------------------------------
-    high_thresh_cols = ["rearing"]
+    high_thresh_cols = ["walk", "jump", "local_search"]
     for col in df.columns[1:]:
         if col in high_thresh_cols:
-            df[col] = df[col].apply(lambda x: 1 if x > 0.5 else 0)
-        if col in ["walk"]:
-            df[col] = df[col].apply(lambda x: 1 if x > 0.5 else 0)
+            df[col] = df[col].apply(lambda x: 1 if x > 0.95 else 0)
+        if col in ["turn_left", "turn_right"]:
+            df[col] = df[col].apply(lambda x: 1 if x > 0.8 else 0)
         else:
-            df[col] = df[col].apply(lambda x: 1 if x > 0.5 else 0)
+            df[col] = df[col].apply(lambda x: 1 if x > 0.9 else 0)
 
     # -----------------------------------------
     # Step 2: 第二轮 - 修复空行和仅 scratch 行
@@ -35,10 +35,10 @@ def threshold(session_name):
     target_rows = zero_rows | only_rearing_rows
 
     # 2.2 对这些行，仅对 backup_cols 中 >0.2 的置为 1，其余不变
-    backup_cols = ["stand_up", "grooming", "local_search", "aiming","scratch","walk","still","eating","rearing"]
+    backup_cols = ["stand_up", "grooming","scratch","still","rearing", "aiming"]
     for col in backup_cols:
         df.loc[target_rows, col] = raw_behavior.loc[target_rows, col].apply(
-            lambda x: 1 if x > 0.3 else 0
+            lambda x: 1 if x > 0.75 else 0
         )
     # 2.3 如果一行动作多过两个，则只取概率最高的两个
     bin_matrix = df[behavior_cols].values  # shape (N, C)，0/1 矩阵
