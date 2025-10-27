@@ -215,5 +215,33 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
     return loss
 
 
+def binary_focal_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    *,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """Multi-label focal loss operating directly on logits."""
+
+    probs = torch.sigmoid(logits)
+    ce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+
+    p_t = probs * targets + (1 - probs) * (1 - targets)
+    alpha_factor = alpha * targets + (1 - alpha) * (1 - targets)
+    modulating = (1 - p_t).clamp_min(0).pow(gamma)
+
+    loss = alpha_factor * modulating * ce
+
+    if reduction == "mean":
+        return loss.mean()
+    if reduction == "sum":
+        return loss.sum()
+    if reduction == "none":
+        return loss
+    raise ValueError(f"Unsupported reduction: {reduction}")
+
+
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import random
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
@@ -19,12 +20,14 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from models.classifier import MLPClassifier
 from models.fusion import EncoderFusion
 from models.losses import (
     gaussian_kl_divergence,
     gaussian_kl_divergence_masked,
     hierarchical_contrastive_loss,
     multilabel_supcon_loss_bt,
+    binary_focal_loss,
     sequential_next_step_nll,
 )
 from utils.checkpoint import load_checkpoint, save_checkpoint
@@ -62,6 +65,7 @@ class TwoStageTrainer:
         self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[1])
         self.scaler = torch.amp.GradScaler("cuda", enabled=(self.device == "cuda"))
         self.temporal_unit = 3
+        self.multi_scales = [16, 32, 64, 128]
         self.unsup_loss_weights = {
             "contrast": 1.0,
             "kl": 0.1,
@@ -73,6 +77,7 @@ class TwoStageTrainer:
             "kl": 0.1,
             "align": 0.1,
             "recon": 0.1,
+            "focal": 1.0,
         }
         if loss_weights:
             unsup_cfg = loss_weights.get("unsup", {})
@@ -90,12 +95,17 @@ class TwoStageTrainer:
         self.total_epochs = 0
         self.current_stage = 1
         self.class_weights: Optional[torch.Tensor] = None
+        self.mlp: Optional[MLPClassifier] = None
+        self.num_labels: int = 0
 
     # ------------------------------------------------------------------
     # Utility helpers
     # ------------------------------------------------------------------
     def _configure_optimizer(self, stage: int) -> None:
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[stage])
+        params = list(self.model.parameters())
+        if stage == 2 and self.mlp is not None:
+            params += list(self.mlp.parameters())
+        self.opt = torch.optim.Adam(params, lr=self.stage_lrs[stage])
         self.current_stage = stage
 
     def _sanitize(self, t: torch.Tensor) -> torch.Tensor:
@@ -118,6 +128,55 @@ class TwoStageTrainer:
             stats[prefix + key] += float(value)
             counts[prefix + key] += 1
 
+    def _ensure_mlp(self, num_labels: int) -> None:
+        if num_labels <= 0:
+            raise ValueError("Number of labels must be positive for supervised stage")
+        input_dim = len(self.multi_scales) * self.d_model
+        hidden_dim = max(256, input_dim * 2)
+        reinit = False
+        if self.mlp is None:
+            reinit = True
+        elif num_labels != self.num_labels:
+            reinit = True
+
+        if reinit:
+            self.num_labels = num_labels
+            self.mlp = MLPClassifier(input_dim=input_dim, hidden_dim=hidden_dim, output_dim=num_labels).to(self.device)
+            if self.current_stage == 2:
+                self._configure_optimizer(2)
+
+    def load_mlp(self, path: str) -> None:
+        if self.mlp is None:
+            raise RuntimeError("MLP classifier must be initialised before loading weights")
+        state = torch.load(path, map_location="cpu")
+        state_dict = state.get("state_dict", state)
+        missing, unexpected = self.mlp.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            print(f"[load_mlp] missing_keys: {missing}, unexpected_keys: {unexpected}")
+
+    def _extract_session_windows(
+        self,
+        dataset: RatsWindowDataset,
+        session: str,
+        centres: List[int],
+        T: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        data = dataset.data[session]
+        imu_rows = data.imu
+        dlc_rows = data.dlc
+        device = imu_rows.device
+        centres_t = torch.tensor(centres, dtype=torch.long, device=device)
+        starts = centres_t - T // 2
+        ar = torch.arange(T, device=device)
+        idx = starts.unsqueeze(1) + ar.view(1, -1)
+        imu_mask = (idx >= 0) & (idx < imu_rows.size(0))
+        idx_clamped = idx.clamp(0, imu_rows.size(0) - 1)
+        imu = imu_rows.index_select(0, idx_clamped.reshape(-1)).reshape(len(centres), T, -1)
+        dlc = dlc_rows.index_select(0, idx_clamped.reshape(-1)).reshape(len(centres), T, -1)
+        imu = imu * imu_mask.unsqueeze(-1)
+        dlc = dlc * imu_mask.unsqueeze(-1)
+        return imu.float(), dlc.float(), imu_mask.bool()
+
     def _prepare_batches(
         self,
         dataset: RatsWindowDataset,
@@ -128,7 +187,16 @@ class TwoStageTrainer:
         mix: bool,
         seed: int,
         n_workers_preproc: int,
+        multi_scale: bool = False,
     ) -> List[Dict[str, torch.Tensor]]:
+        if multi_scale:
+            return self._prepare_batches_multi_scale(
+                dataset,
+                batch_size,
+                use_unlabeled=use_unlabeled,
+                mix=mix,
+                seed=seed,
+            )
         preprocess_dataset(
             dataset,
             batch_size,
@@ -149,6 +217,57 @@ class TwoStageTrainer:
             )
         )
 
+    def _prepare_batches_multi_scale(
+        self,
+        dataset: RatsWindowDataset,
+        batch_size: int,
+        *,
+        use_unlabeled: bool,
+        mix: bool,
+        seed: int,
+    ) -> List[Dict[str, torch.Tensor]]:
+        rng = random.Random(seed)
+        samples = dataset.unsup_samples if use_unlabeled else dataset.samples
+        if not samples:
+            return []
+
+        session_to_indices: Dict[str, List[int]] = defaultdict(list)
+        for idx, (session, _label, _centre) in enumerate(samples):
+            session_to_indices[session].append(idx)
+
+        batches: List[Dict[str, torch.Tensor]] = []
+        for session, indices in session_to_indices.items():
+            rng.shuffle(indices)
+            groups = [indices[i : i + batch_size] for i in range(0, len(indices), batch_size)]
+            groups = [g for g in groups if len(g) == batch_size]
+            for group in groups:
+                centres = [samples[i][2] for i in group]
+                labels = torch.stack([samples[i][1] for i in group], dim=0).float()
+                session_idx = torch.full((batch_size,), dataset.session_to_idx[session], dtype=torch.long)
+                imu_list: List[torch.Tensor] = []
+                dlc_list: List[torch.Tensor] = []
+                mask_list: List[torch.Tensor] = []
+                for T in self.multi_scales:
+                    imu_win, dlc_win, mask = self._extract_session_windows(dataset, session, centres, T)
+                    imu_list.append(imu_win)
+                    dlc_list.append(dlc_win)
+                    mask_list.append(mask)
+                batches.append(
+                    {
+                        "imu": imu_list,
+                        "dlc": dlc_list,
+                        "mask": mask_list,
+                        "label": labels,
+                        "session": session,
+                        "session_idx": session_idx,
+                    }
+                )
+
+        if mix:
+            rng.shuffle(batches)
+
+        return batches
+
     # ------------------------------------------------------------------
     # Training steps
     # ------------------------------------------------------------------
@@ -156,6 +275,8 @@ class TwoStageTrainer:
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        if isinstance(batch.get("imu"), (list, tuple)):
+            return self._step_unsup_multi(batch)
         imu = self._sanitize(batch["imu"].to(self.device))
         dlc = self._sanitize(batch["dlc"].to(self.device))
         mask = batch.get("mask")
@@ -257,7 +378,138 @@ class TwoStageTrainer:
         }
         return loss_total, metrics
 
+    def _step_unsup_multi(
+        self,
+        batch: Dict[str, torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        imu_list = [self._sanitize(t.to(self.device)) for t in batch["imu"]]
+        dlc_list = [self._sanitize(t.to(self.device)) for t in batch["dlc"]]
+        session_idx = batch.get("session_idx")
+        if session_idx is not None:
+            session_idx = session_idx.to(self.device, dtype=torch.long)
+
+        pooled_view1: List[torch.Tensor] = []
+        pooled_view2: List[torch.Tensor] = []
+        loss_align_nll = torch.tensor(0.0, device=self.device)
+        loss_align_kl = torch.tensor(0.0, device=self.device)
+        loss_recon_nll = torch.tensor(0.0, device=self.device)
+        loss_recon_kl = torch.tensor(0.0, device=self.device)
+        valid_scales = 0
+        jitter_std = 0.01
+
+        for imu, dlc in zip(imu_list, dlc_list):
+            B, T, _ = imu.shape
+            if T <= 5:
+                continue
+
+            crop_min = min(2 ** (self.temporal_unit + 1), T)
+            crop_max = T
+            if crop_max <= crop_min:
+                crop_l = crop_max
+            else:
+                crop_l = int(np.random.randint(low=crop_min, high=crop_max + 1))
+            crop_left = int(np.random.randint(0, max(T - crop_l + 1, 1)))
+            crop_right = crop_left + crop_l
+            crop_eleft = int(np.random.randint(0, crop_left + 1))
+            crop_eright = int(np.random.randint(low=crop_right, high=T + 1))
+            crop_offset = torch.randint(
+                low=-crop_eleft,
+                high=T - crop_eright + 1,
+                size=(B,),
+                device=imu.device,
+            )
+
+            imu_crop1 = take_per_row(imu, crop_offset + crop_eleft, crop_right - crop_eleft)
+            dlc_crop1 = take_per_row(dlc, crop_offset + crop_eleft, crop_right - crop_eleft)
+            imu_crop2 = take_per_row(imu, crop_offset + crop_left, crop_eright - crop_left)
+            dlc_crop2 = take_per_row(dlc, crop_offset + crop_left, crop_eright - crop_left)
+
+            crop_len = int(crop_right - crop_left)
+            with torch.amp.autocast("cuda", enabled=(self.device == "cuda")):
+                out1 = self.model(imu_crop1, dlc_crop1, session_idx=session_idx)
+                out2 = self.model(imu_crop2, dlc_crop2, session_idx=session_idx)
+
+                emb1 = out1.fused[:, -crop_len:]
+                emb2 = out2.fused[:, :crop_len]
+                emb1 = F.normalize(emb1 + torch.randn_like(emb1) * jitter_std, dim=-1)
+                emb2 = F.normalize(emb2 + torch.randn_like(emb2) * jitter_std, dim=-1)
+
+                pooled1 = torch.amax(emb1, dim=1, keepdim=True)
+                pooled2 = torch.amax(emb2, dim=1, keepdim=True)
+                pooled1 = F.normalize(pooled1, dim=-1)
+                pooled2 = F.normalize(pooled2, dim=-1)
+                pooled_view1.append(pooled1)
+                pooled_view2.append(pooled2)
+
+                loss_align_nll = loss_align_nll + 0.5 * (
+                    sequential_next_step_nll(out1.imu_to_dlc, out1.dlc_self)
+                    + sequential_next_step_nll(out1.dlc_to_imu, out1.imu_self)
+                )
+                loss_align_kl = loss_align_kl + 0.5 * (
+                    gaussian_kl_divergence(out1.imu_to_dlc, out1.dlc_self)
+                    + gaussian_kl_divergence(out1.dlc_to_imu, out1.imu_self)
+                )
+
+                recon_a = out1.imu_recon[:, -crop_len:]
+                recon_b = out1.dlc_recon[:, -crop_len:]
+                recon_a2 = out2.imu_recon[:, :crop_len]
+                recon_b2 = out2.dlc_recon[:, :crop_len]
+
+                loss_recon_nll = loss_recon_nll + 0.25 * (
+                    sequential_next_step_nll(recon_a, imu_crop1[:, -crop_len:])
+                    + sequential_next_step_nll(recon_b, dlc_crop1[:, -crop_len:])
+                    + sequential_next_step_nll(recon_a2, imu_crop2[:, :crop_len])
+                    + sequential_next_step_nll(recon_b2, dlc_crop2[:, :crop_len])
+                )
+                loss_recon_kl = loss_recon_kl + 0.25 * (
+                    gaussian_kl_divergence(recon_a, imu_crop1[:, -crop_len:])
+                    + gaussian_kl_divergence(recon_b, dlc_crop1[:, -crop_len:])
+                    + gaussian_kl_divergence(recon_a2, imu_crop2[:, :crop_len])
+                    + gaussian_kl_divergence(recon_b2, dlc_crop2[:, :crop_len])
+                )
+
+            valid_scales += 1
+
+        if valid_scales == 0 or not pooled_view1:
+            zero = torch.tensor(0.0, device=self.device)
+            metrics = {
+                "align_nll": zero,
+                "align_kl": zero,
+                "reconstruction_nll": zero,
+                "reconstruction_kl": zero,
+                "unsupervised_contrastive": zero,
+            }
+            return None, metrics
+
+        emb1_cat = torch.cat(pooled_view1, dim=-1)
+        emb2_cat = torch.cat(pooled_view2, dim=-1)
+        loss_contrast = hierarchical_contrastive_loss(emb1_cat, emb2_cat, temporal_unit=0)
+
+        loss_align_nll = loss_align_nll / valid_scales
+        loss_align_kl = loss_align_kl / valid_scales
+        loss_recon_nll = loss_recon_nll / valid_scales
+        loss_recon_kl = loss_recon_kl / valid_scales
+
+        unsup_w = self.unsup_loss_weights
+        loss_total = (
+            unsup_w.get("contrast", 1.0) * loss_contrast
+            + unsup_w.get("align", 1.0) * loss_align_nll
+            + unsup_w.get("kl", 1.0) * loss_align_kl
+            + unsup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
+        )
+
+        metrics = {
+            "align_nll": loss_align_nll.detach(),
+            "align_kl": loss_align_kl.detach(),
+            "reconstruction_nll": loss_recon_nll.detach(),
+            "reconstruction_kl": loss_recon_kl.detach(),
+            "unsupervised_contrastive": loss_contrast.detach(),
+        }
+        return loss_total, metrics
+
     def _step_sup(self, batch: Dict[str, torch.Tensor]) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        if isinstance(batch.get("imu"), (list, tuple)):
+            return self._step_sup_multi(batch)
         imu = self._sanitize(batch["imu"].to(self.device))
         dlc = self._sanitize(batch["dlc"].to(self.device))
         labels = batch["label"].to(self.device)
@@ -331,6 +583,126 @@ class TwoStageTrainer:
         }
         return loss_total, metrics
 
+    def _step_sup_multi(self, batch: Dict[str, torch.Tensor]) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
+        if self.mlp is None:
+            raise RuntimeError("MLP classifier has not been initialised")
+
+        imu_list = [self._sanitize(t.to(self.device)) for t in batch["imu"]]
+        dlc_list = [self._sanitize(t.to(self.device)) for t in batch["dlc"]]
+        mask_data = batch.get("mask")
+        if not isinstance(mask_data, (list, tuple)):
+            mask_list = [None for _ in imu_list]
+        else:
+            mask_list = [m.to(self.device) if m is not None else None for m in mask_data]
+
+        labels = batch["label"].to(self.device)
+        session_idx = batch.get("session_idx")
+        if session_idx is not None:
+            session_idx = session_idx.to(self.device, dtype=torch.long)
+
+        if self.class_weights is not None:
+            weights = self.class_weights.to(labels.device)
+            sample_w = (labels * weights).max(dim=1).values
+            mix_idx = torch.multinomial(sample_w, labels.size(0), replacement=True)
+            partner_idx = torch.randint(0, labels.size(0), (len(mix_idx),), device=labels.device)
+            lam = 0.5
+            label_mix = torch.clamp(labels[mix_idx] + labels[partner_idx], 0, 1)
+            labels = torch.cat([labels, label_mix], dim=0)
+            if session_idx is not None:
+                session_mix = session_idx[mix_idx]
+                session_idx = torch.cat([session_idx, session_mix], dim=0)
+
+            new_imu: List[torch.Tensor] = []
+            new_dlc: List[torch.Tensor] = []
+            new_mask: List[Optional[torch.Tensor]] = []
+            for imu, dlc, mask in zip(imu_list, dlc_list, mask_list):
+                imu_mix = lam * imu[mix_idx] + (1 - lam) * imu[partner_idx]
+                dlc_mix = lam * dlc[mix_idx] + (1 - lam) * dlc[partner_idx]
+                imu = torch.cat([imu, imu_mix], dim=0)
+                dlc = torch.cat([dlc, dlc_mix], dim=0)
+                if mask is not None:
+                    mask_mix = mask[mix_idx] & mask[partner_idx]
+                    mask = torch.cat([mask, mask_mix], dim=0)
+                new_imu.append(imu)
+                new_dlc.append(dlc)
+                new_mask.append(mask)
+            imu_list = new_imu
+            dlc_list = new_dlc
+            mask_list = new_mask
+
+        batch_size = labels.size(0)
+        scale = torch.empty(batch_size, 1, 1, device=self.device).uniform_(0.8, 1.2)
+        for i in range(len(imu_list)):
+            imu_list[i] = self._sanitize(imu_list[i] * scale)
+            dlc_list[i] = self._sanitize(dlc_list[i] * scale)
+
+        loss_align_nll = torch.tensor(0.0, device=self.device)
+        loss_align_kl = torch.tensor(0.0, device=self.device)
+        loss_recon_nll = torch.tensor(0.0, device=self.device)
+        loss_recon_kl = torch.tensor(0.0, device=self.device)
+        pooled_embeddings: List[torch.Tensor] = []
+        mlp_features: List[torch.Tensor] = []
+
+        with torch.amp.autocast("cuda", enabled=(self.device == "cuda")):
+            for imu, dlc, mask in zip(imu_list, dlc_list, mask_list):
+                out = self.model(imu, dlc, session_idx=session_idx, mask=mask)
+                jitter_std = 0.01
+                seq = out.fused + torch.randn_like(out.fused) * jitter_std
+                seq = F.normalize(seq, dim=-1)
+                pooled = torch.amax(seq, dim=1, keepdim=True)
+                pooled = F.normalize(pooled, dim=-1)
+                pooled_embeddings.append(pooled)
+                mlp_features.append(torch.amax(out.fused, dim=1))
+
+                loss_align_nll = loss_align_nll + 0.5 * (
+                    sequential_next_step_nll(out.imu_to_dlc, out.dlc_self)
+                    + sequential_next_step_nll(out.dlc_to_imu, out.imu_self)
+                )
+                loss_align_kl = loss_align_kl + 0.5 * (
+                    gaussian_kl_divergence(out.imu_to_dlc, out.dlc_self)
+                    + gaussian_kl_divergence(out.dlc_to_imu, out.imu_self)
+                )
+                loss_recon_nll = loss_recon_nll + 0.5 * (
+                    sequential_next_step_nll(out.imu_recon, imu, mask)
+                    + sequential_next_step_nll(out.dlc_recon, dlc, mask)
+                )
+                loss_recon_kl = loss_recon_kl + 0.5 * (
+                    gaussian_kl_divergence_masked(out.imu_recon, imu, mask)
+                    + gaussian_kl_divergence_masked(out.dlc_recon, dlc, mask)
+                )
+
+            emb = torch.cat(pooled_embeddings, dim=-1)
+            loss_sup = multilabel_supcon_loss_bt(emb, labels)
+
+            mlp_input = torch.cat(mlp_features, dim=-1)
+            logits = self.mlp(mlp_input)
+            loss_focal = binary_focal_loss(logits, labels)
+
+        num_scales = max(len(pooled_embeddings), 1)
+        loss_align_nll = loss_align_nll / num_scales
+        loss_align_kl = loss_align_kl / num_scales
+        loss_recon_nll = loss_recon_nll / num_scales
+        loss_recon_kl = loss_recon_kl / num_scales
+
+        sup_w = self.sup_loss_weights
+        loss_total = (
+            sup_w.get("contrast", 1.0) * loss_sup
+            + sup_w.get("align", 1.0) * loss_align_nll
+            + sup_w.get("kl", 1.0) * loss_align_kl
+            + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
+            + sup_w.get("focal", 1.0) * loss_focal
+        )
+
+        metrics = {
+            "align_nll": loss_align_nll.detach(),
+            "align_kl": loss_align_kl.detach(),
+            "reconstruction_nll": loss_recon_nll.detach(),
+            "reconstruction_kl": loss_recon_kl.detach(),
+            "supervised_contrastive": loss_sup.detach(),
+            "focal_loss": loss_focal.detach(),
+        }
+        return loss_total, metrics
+
     def _train_epoch(
         self,
         unsup_batches: List[Dict[str, torch.Tensor]],
@@ -340,6 +712,10 @@ class TwoStageTrainer:
         include_supervised: bool,
     ) -> Dict[str, float]:
         self.model.train()
+        if include_supervised and self.mlp is not None:
+            self.mlp.train()
+        elif self.mlp is not None:
+            self.mlp.eval()
         stats: Dict[str, float] = defaultdict(float)
         counts: Dict[str, int] = defaultdict(int)
 
@@ -491,6 +867,7 @@ class TwoStageTrainer:
         n_workers_preproc: int = 0,
         save_gap: int = 1,
     ) -> None:
+        self._ensure_mlp(dataset.num_labels)
         if self.current_stage != 2:
             self._configure_optimizer(2)
 
@@ -510,6 +887,7 @@ class TwoStageTrainer:
                 mix=True,
                 seed=5678 + ep,
                 n_workers_preproc=n_workers_preproc,
+                multi_scale=True,
             )
             sup_batches = self._prepare_batches(
                 dataset,
@@ -519,6 +897,7 @@ class TwoStageTrainer:
                 mix=True,
                 seed=5678 + ep,
                 n_workers_preproc=n_workers_preproc,
+                multi_scale=True,
             )
 
             metrics = self._train_epoch(
@@ -538,6 +917,15 @@ class TwoStageTrainer:
                     stage=2,
                     path=os.path.join("checkpoints", f"stage2_epoch{self.total_epochs}.pt"),
                 )
+                if self.mlp is not None:
+                    os.makedirs("checkpoints_mlp", exist_ok=True)
+                    torch.save(
+                        {
+                            "state_dict": self.mlp.state_dict(),
+                            "total_epochs": self.total_epochs,
+                        },
+                        os.path.join("checkpoints_mlp", f"stage2_epoch{self.total_epochs}.pt"),
+                    )
 
 
 def main() -> None:
@@ -587,8 +975,14 @@ def main() -> None:
         ckpt_stage = 1 if start_epoch <= stage1_epochs else 2
         ckpt_path = os.path.join("checkpoints", f"stage{ckpt_stage}_epoch{start_epoch}.pt")
         if os.path.exists(ckpt_path):
+            if ckpt_stage == 2:
+                trainer._ensure_mlp(train_ds.num_labels)
             trainer._configure_optimizer(ckpt_stage)
             trainer.load_from(ckpt_path, expected_stage=ckpt_stage, load_optimizer=(ckpt_stage == start_stage))
+            if ckpt_stage == 2:
+                mlp_path = os.path.join("checkpoints_mlp", f"stage2_epoch{start_epoch}.pt")
+                if os.path.exists(mlp_path):
+                    trainer.load_mlp(mlp_path)
             if start_stage == 2:
                 trainer._configure_optimizer(2)
         else:
