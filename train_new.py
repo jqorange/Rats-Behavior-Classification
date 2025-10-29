@@ -558,7 +558,7 @@ def main() -> None:
         sessions,
         split="train",
         session_ranges=session_ranges,
-        test_ratio = 0.8,
+        test_ratio = 0.3,
         split_seed=args.split_seed,
     )
 
