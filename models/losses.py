@@ -216,4 +216,29 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
 
 
 
+class FocalLoss(torch.nn.Module):
+    """Multi-label focal loss operating on logits."""
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 3.0, reduction: str = "mean") -> None:
+        super().__init__()
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
+        if reduction not in {"mean", "sum", "none"}:
+            raise ValueError("reduction must be 'mean', 'sum', or 'none'")
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.to(logits.dtype)
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probs = torch.sigmoid(logits)
+        pt = probs * targets + (1 - probs) * (1 - targets)
+        focal_weight = self.alpha * (1 - pt).pow(self.gamma)
+        loss = focal_weight * bce
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
+
+
 

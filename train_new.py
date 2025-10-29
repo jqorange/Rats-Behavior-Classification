@@ -19,8 +19,10 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from models.classifier import MLPClassifier
 from models.fusion import EncoderFusion
 from models.losses import (
+    FocalLoss,
     gaussian_kl_divergence,
     gaussian_kl_divergence_masked,
     hierarchical_contrastive_loss,
@@ -39,6 +41,7 @@ class TwoStageTrainer:
         num_features_imu: int,
         num_features_dlc: int,
         num_sessions: int,
+        num_classes: int,
         device: Optional[str] = None,
         *,
         stage_lrs: Optional[Dict[int, float]] = None,
@@ -54,6 +57,16 @@ class TwoStageTrainer:
             nhead=4,
             num_sessions=num_sessions,
         ).to(self.device)
+
+        self.num_classes = int(num_classes)
+        self.classifier = MLPClassifier(
+            input_dim=self.d_model,
+            hidden_dim=self.d_model * 2,
+            output_dim=self.num_classes,
+            dropout=0.1,
+        ).to(self.device)
+        self.focal_loss = FocalLoss(alpha=0.25, gamma=3.0, reduction="mean")
+        self.classifier_ckpt_dir = "checkpoints_mlp"
 
         self.stage_lrs: Dict[int, float] = {1: 1e-3, 2: 5e-4}
         if stage_lrs:
@@ -95,7 +108,13 @@ class TwoStageTrainer:
     # Utility helpers
     # ------------------------------------------------------------------
     def _configure_optimizer(self, stage: int) -> None:
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[stage])
+        params = list(self.model.parameters())
+        if stage >= 2:
+            self.classifier.requires_grad_(True)
+            params += list(self.classifier.parameters())
+        else:
+            self.classifier.requires_grad_(False)
+        self.opt = torch.optim.Adam(params, lr=self.stage_lrs[stage])
         self.current_stage = stage
 
     def _sanitize(self, t: torch.Tensor) -> torch.Tensor:
@@ -291,11 +310,16 @@ class TwoStageTrainer:
             if session_idx is not None:
                 session_idx = torch.cat([session_idx, session_mix], dim=0)
 
+        loss_focal = None
         with torch.amp.autocast("cuda", enabled=(self.device == "cuda")):
             out = self.model(imu, dlc, session_idx=session_idx, mask=mask)
             jitter_std = 0.01
             emb = out.fused + torch.randn_like(out.fused) * jitter_std
             emb = F.normalize(emb, dim=-1)
+
+            pooled = out.fused.mean(dim=1)
+            logits = self.classifier(pooled)
+            loss_focal = self.focal_loss(logits, labels)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
             loss_align_nll = 0.5 * (
@@ -322,12 +346,15 @@ class TwoStageTrainer:
                 + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
+            loss_total = loss_total + loss_focal
+
         metrics = {
             "align_nll": loss_align_nll.detach(),
             "align_kl": loss_align_kl.detach(),
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "supervised_contrastive": loss_sup.detach(),
+            "classification_focal": loss_focal.detach() if loss_focal is not None else None,
         }
         return loss_total, metrics
 
@@ -340,6 +367,7 @@ class TwoStageTrainer:
         include_supervised: bool,
     ) -> Dict[str, float]:
         self.model.train()
+        self.classifier.train(include_supervised)
         stats: Dict[str, float] = defaultdict(float)
         counts: Dict[str, int] = defaultdict(int)
 
@@ -419,12 +447,33 @@ class TwoStageTrainer:
             final_metrics["supervised_contrastive_loss"] = (
                 sup_contrast_sum / sup_contrast_count if sup_contrast_count > 0 else 0.0
             )
+            focal_sum = stats.get("sup_classification_focal", 0.0)
+            focal_count = counts.get("sup_classification_focal", 0)
+            final_metrics["classification_focal_loss"] = (
+                focal_sum / focal_count if focal_count > 0 else 0.0
+            )
 
         return final_metrics
 
     def _log_epoch(self, stage_name: str, metrics: Dict[str, float]) -> None:
         ordered = " ".join(f"{k}={v:.4f}" for k, v in sorted(metrics.items()))
         print(f"[{stage_name}][Epoch {self.total_epochs}] {ordered}")
+
+    def save_classifier_checkpoint(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save({"classifier_state": self.classifier.state_dict()}, path)
+
+    def load_classifier_checkpoint(self, path: str) -> None:
+        if not os.path.exists(path):
+            return
+        state = torch.load(path, map_location="cpu")
+        if isinstance(state, dict) and "classifier_state" in state:
+            state = state["classifier_state"]
+        missing, unexpected = self.classifier.load_state_dict(state, strict=False)
+        if missing or unexpected:
+            print(
+                f"[load_classifier_checkpoint] missing_keys: {missing}, unexpected_keys: {unexpected}"
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -439,6 +488,11 @@ class TwoStageTrainer:
             expected_stage=expected_stage,
         )
         self.current_stage = stage
+        if stage >= 2:
+            mlp_path = os.path.join(
+                self.classifier_ckpt_dir, f"stage{stage}_epoch{self.total_epochs}.pt"
+            )
+            self.load_classifier_checkpoint(mlp_path)
         return stage
 
     def stage1(
@@ -538,6 +592,11 @@ class TwoStageTrainer:
                     stage=2,
                     path=os.path.join("checkpoints", f"stage2_epoch{self.total_epochs}.pt"),
                 )
+                self.save_classifier_checkpoint(
+                    os.path.join(
+                        self.classifier_ckpt_dir, f"stage2_epoch{self.total_epochs}.pt"
+                    )
+                )
 
 
 def main() -> None:
@@ -570,6 +629,7 @@ def main() -> None:
         num_feat_imu,
         num_feat_dlc,
         num_sessions,
+        train_ds.num_labels,
         stage_lrs={1: args.lr_stage1, 2: args.lr_stage2},
     )
 
