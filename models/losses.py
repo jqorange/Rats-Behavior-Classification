@@ -2,6 +2,7 @@ import math
 from typing import Optional
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -213,6 +214,29 @@ def multilabel_supcon_loss_bt(z, y, temperature=0.07, eps=1e-8, topk: int = 64):
     # Weighted contrastive loss
     loss = -(weights * log_prob_topk).sum(dim=1).mean()
     return loss
+
+
+class FocalLoss(nn.Module):
+    """Binary focal loss for multi-label classification."""
+
+    def __init__(self, alpha: float = 0.25, gamma: float = 2.0, reduction: str = "mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        targets = targets.float()
+        bce = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+        probs = torch.sigmoid(logits)
+        pt = probs * targets + (1.0 - probs) * (1.0 - targets)
+        focal_weight = self.alpha * torch.pow(1.0 - pt, self.gamma)
+        loss = focal_weight * bce
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 
 

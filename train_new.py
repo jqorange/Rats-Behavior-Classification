@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
@@ -24,6 +25,7 @@ from models.losses import (
     gaussian_kl_divergence,
     gaussian_kl_divergence_masked,
     hierarchical_contrastive_loss,
+    FocalLoss,
     multilabel_supcon_loss_bt,
     sequential_next_step_nll,
 )
@@ -43,6 +45,7 @@ class TwoStageTrainer:
         *,
         stage_lrs: Optional[Dict[int, float]] = None,
         loss_weights: Optional[Dict[str, Dict[str, float]]] = None,
+        num_labels: Optional[int] = None,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.d_model = 64
@@ -90,12 +93,20 @@ class TwoStageTrainer:
         self.total_epochs = 0
         self.current_stage = 1
         self.class_weights: Optional[torch.Tensor] = None
+        self.num_labels = num_labels
+        self.mlp: Optional[nn.Module] = None
+        self.focal_loss = FocalLoss(alpha=0.25, gamma=2.0).to(self.device)
+        if self.num_labels:
+            self._ensure_mlp(self.num_labels)
 
     # ------------------------------------------------------------------
     # Utility helpers
     # ------------------------------------------------------------------
     def _configure_optimizer(self, stage: int) -> None:
-        self.opt = torch.optim.Adam(self.model.parameters(), lr=self.stage_lrs[stage])
+        params = list(self.model.parameters())
+        if stage == 2 and self.mlp is not None:
+            params += list(self.mlp.parameters())
+        self.opt = torch.optim.Adam(params, lr=self.stage_lrs[stage])
         self.current_stage = stage
 
     def _sanitize(self, t: torch.Tensor) -> torch.Tensor:
@@ -117,6 +128,23 @@ class TwoStageTrainer:
                 value = float(value.detach().cpu())
             stats[prefix + key] += float(value)
             counts[prefix + key] += 1
+
+    def _ensure_mlp(self, num_labels: int) -> None:
+        if self.mlp is not None:
+            return
+        hidden = self.d_model * 2
+        self.mlp = nn.Sequential(
+            nn.Linear(self.d_model, hidden),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, num_labels),
+        ).to(self.device)
+
+    def _save_mlp_checkpoint(self, tag: str) -> None:
+        if self.mlp is None:
+            return
+        os.makedirs("checkpoints_mlp", exist_ok=True)
+        torch.save(self.mlp.state_dict(), os.path.join("checkpoints_mlp", f"{tag}_mlp.pt"))
 
     def _prepare_batches(
         self,
@@ -298,6 +326,11 @@ class TwoStageTrainer:
             emb = F.normalize(emb, dim=-1)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
+            loss_focal = None
+            if self.current_stage == 2 and self.mlp is not None:
+                pooled = F.max_pool1d(out.fused.transpose(1, 2), kernel_size=out.fused.size(1)).squeeze(-1)
+                logits = self.mlp(pooled)
+                loss_focal = self.focal_loss(logits, labels)
             loss_align_nll = 0.5 * (
                 sequential_next_step_nll(out.imu_to_dlc, out.dlc_self)
                 + sequential_next_step_nll(out.dlc_to_imu, out.imu_self)
@@ -321,6 +354,8 @@ class TwoStageTrainer:
                 + sup_w.get("kl", 1.0) * loss_align_kl
                 + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
+            if loss_focal is not None:
+                loss_total = loss_total + loss_focal
 
         metrics = {
             "align_nll": loss_align_nll.detach(),
@@ -328,6 +363,7 @@ class TwoStageTrainer:
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "supervised_contrastive": loss_sup.detach(),
+            "focal": loss_focal.detach() if loss_focal is not None else None,
         }
         return loss_total, metrics
 
@@ -340,6 +376,8 @@ class TwoStageTrainer:
         include_supervised: bool,
     ) -> Dict[str, float]:
         self.model.train()
+        if self.mlp is not None:
+            self.mlp.train()
         stats: Dict[str, float] = defaultdict(float)
         counts: Dict[str, int] = defaultdict(int)
 
@@ -419,6 +457,10 @@ class TwoStageTrainer:
             final_metrics["supervised_contrastive_loss"] = (
                 sup_contrast_sum / sup_contrast_count if sup_contrast_count > 0 else 0.0
             )
+            focal_sum = stats.get("sup_focal", 0.0)
+            focal_count = counts.get("sup_focal", 0)
+            if focal_count > 0:
+                final_metrics["focal_loss"] = focal_sum / focal_count
 
         return final_metrics
 
@@ -439,6 +481,14 @@ class TwoStageTrainer:
             expected_stage=expected_stage,
         )
         self.current_stage = stage
+        if expected_stage == 2 and self.mlp is None and self.num_labels:
+            self._ensure_mlp(self.num_labels)
+        if expected_stage == 2 and self.mlp is not None:
+            mlp_name = os.path.basename(path).replace(".pt", "_mlp.pt")
+            mlp_path = os.path.join("checkpoints_mlp", mlp_name)
+            if os.path.exists(mlp_path):
+                state = torch.load(mlp_path, map_location="cpu")
+                self.mlp.load_state_dict(state)
         return stage
 
     def stage1(
@@ -491,6 +541,8 @@ class TwoStageTrainer:
         n_workers_preproc: int = 0,
         save_gap: int = 1,
     ) -> None:
+        if dataset.num_labels and self.mlp is None:
+            self._ensure_mlp(dataset.num_labels)
         if self.current_stage != 2:
             self._configure_optimizer(2)
 
@@ -530,14 +582,17 @@ class TwoStageTrainer:
             self.total_epochs += 1
             self._log_epoch("Stage2", metrics)
             if self.total_epochs % save_gap == 0:
+                ckpt_tag = f"stage2_epoch{self.total_epochs}"
+                ckpt_path = os.path.join("checkpoints", f"{ckpt_tag}.pt")
                 save_checkpoint(
                     self.model,
                     self.model.projection,
                     self.opt,
                     total_epochs=self.total_epochs,
                     stage=2,
-                    path=os.path.join("checkpoints", f"stage2_epoch{self.total_epochs}.pt"),
+                    path=ckpt_path,
                 )
+                self._save_mlp_checkpoint(ckpt_tag)
 
 
 def main() -> None:
@@ -571,6 +626,7 @@ def main() -> None:
         num_feat_dlc,
         num_sessions,
         stage_lrs={1: args.lr_stage1, 2: args.lr_stage2},
+        num_labels=train_ds.num_labels,
     )
 
     n_workers_preproc = 1
