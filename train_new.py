@@ -549,7 +549,7 @@ def main() -> None:
     args = parser.parse_args()
 
     data_root = r"D:\\Jiaqi\\Datasets\\Rats\\TrainData_new"
-    sessions = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor", "F6D5_outdoor_2"]
+    sessions = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor",  "F5D7_outdoor"]
     batch_size = 512
     session_ranges = None
 
