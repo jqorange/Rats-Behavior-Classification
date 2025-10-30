@@ -7,7 +7,13 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from .segments import SegmentInfo, SegmentKey, compute_segments, extract_label_arrays, split_segments_by_action
+from .segments import (
+    SegmentInfo,
+    SegmentKey,
+    assign_segments_train_val_test,
+    compute_segments,
+    extract_label_arrays,
+)
 
 
 @dataclass
@@ -51,9 +57,11 @@ class RatsWindowDataset(Dataset):
         *,
         test_ratio: float = 0.2,
         split_seed: int = 0,
+        num_folds: int = 1,
+        fold_index: int = 0,
     ) -> None:
         super().__init__()
-        assert split in {"train", "test"}
+        assert split in {"train", "val", "test"}
         self.root = root
         self.sessions = list(sessions)
         self.split = split
@@ -61,6 +69,8 @@ class RatsWindowDataset(Dataset):
         self.max_len_per_session = max_len_per_session
         self.test_ratio = float(test_ratio)
         self.split_seed = int(split_seed)
+        self.num_folds = int(num_folds)
+        self.fold_index = int(fold_index)
 
         # map session names to consecutive indices
         self.session_to_idx = {s: i for i, s in enumerate(self.sessions)}
@@ -153,8 +163,18 @@ class RatsWindowDataset(Dataset):
                 self.unsup_samples.append((session, zero_label, int(c)))
 
         if session_segments:
-            assignments = split_segments_by_action(
-                session_segments, test_ratio=self.test_ratio, seed=self.split_seed
+            holdout_ratio = float(self.test_ratio)
+            train_ratio = max(0.0, 1.0 - holdout_ratio)
+            val_ratio = holdout_ratio / 3.0
+            test_ratio = max(0.0, holdout_ratio - val_ratio)
+            assignments = assign_segments_train_val_test(
+                session_segments,
+                train_ratio=train_ratio,
+                test_ratio=test_ratio,
+                val_ratio=val_ratio,
+                seed=self.split_seed,
+                num_folds=self.num_folds,
+                fold_index=self.fold_index,
             )
             for session, per_action in session_segments.items():
                 labels_tensor = session_label_arrays.get(session)

@@ -13,9 +13,9 @@ from sklearn.metrics import precision_recall_fscore_support
 
 from models.deep_mlp import DeepMLPClassifier
 from utils.segments import (
+    assign_segments_train_val_test,
     collect_segment_centres,
     compute_segments,
-    split_segments_by_action,
 )
 
 # =========================================================
@@ -80,7 +80,7 @@ def _collect_split_tensors(
     session_data: Dict[str, SessionSplitData],
     segments_by_session: Dict[str, Dict[str, List[Any]]],
     assignments: Dict[str, Any],
-    split: str,  # "train" or "test" (from the old 70/30 world)
+    split: str,  # "train", "val" or "test"
     feature_dim: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
@@ -416,7 +416,11 @@ def main():
     p.add_argument("--split-seed", type=int, default=0,
                    help="Seed for segment-level splits (must match old seed).")
     p.add_argument("--val-frac-in-holdout", type=float, default=1.0/3.0,
-                   help="Fraction of the 30% holdout that becomes val (~1/3 => 10% total).")
+                   help="Fraction of the holdout portion used for validation (default keeps 7:2:1).")
+    p.add_argument("--cross-folds", type=int, default=1,
+                   help="Total number of cross-validation folds.")
+    p.add_argument("--cross-index", type=int, default=0,
+                   help="Index of the current cross-validation fold (0-based).")
 
     # 初始权重（可选, 例如 round1_best.pth）
     p.add_argument(
@@ -435,6 +439,23 @@ def main():
     args = p.parse_args()
 
     os.makedirs(args.ckpt_dir, exist_ok=True)
+
+    if args.cross_folds <= 0:
+        raise ValueError("--cross-folds must be positive")
+    if not (0 <= args.cross_index < args.cross_folds):
+        raise ValueError("--cross-index must satisfy 0 <= index < --cross-folds")
+
+    holdout_ratio = float(args.primary_test_ratio)
+    if not (0.0 < holdout_ratio < 1.0):
+        raise ValueError("--primary-test-ratio must be between 0 and 1")
+
+    val_fraction = float(args.val_frac_in_holdout)
+    if not (0.0 < val_fraction < 1.0):
+        raise ValueError("--val-frac-in-holdout must be between 0 and 1")
+
+    train_ratio = max(0.0, 1.0 - holdout_ratio)
+    val_ratio = holdout_ratio * val_fraction
+    test_ratio = holdout_ratio - val_ratio
 
     # -----------------------------------------------------
     # Step 1. 读取所有 session 的特征&标签 + 段定义
@@ -506,58 +527,51 @@ def main():
     feature_dim = next(iter(session_data.values())).features.shape[1]
 
     # -----------------------------------------------------
-    # Step 2. 跑老逻辑的 split_segments_by_action(test_ratio=0.3)
-    #         -> 这给了我们 “70%训练 + 30%holdout”
+    # Step 2. 按照 7:2:1 比例生成 train/val/test 分割（可跨折重现）
     # -----------------------------------------------------
-    assignments_70_30 = split_segments_by_action(
+    assignments = assign_segments_train_val_test(
         segments_by_session,
-        test_ratio=args.primary_test_ratio,  # 0.3
+        train_ratio=train_ratio,
+        test_ratio=test_ratio,
+        val_ratio=val_ratio,
         seed=args.split_seed,
+        num_folds=args.cross_folds,
+        fold_index=args.cross_index,
     )
 
     # -----------------------------------------------------
-    # Step 3. 用老逻辑直接收集：
-    #   - train70_feats / train70_labels  (原来的 train, 70%)
-    #   - holdout30_feats / holdout30_labels (原来的 test, 30%)
+    # Step 3. 根据 assignments 收集每个 split 的特征/标签
     # -----------------------------------------------------
     train70_feats, train70_labels = _collect_split_tensors(
         session_data,
         segments_by_session,
-        assignments_70_30,
+        assignments,
         "train",
         feature_dim,
     )
-    holdout30_feats, holdout30_labels = _collect_split_tensors(
+    val_feats, val_labels = _collect_split_tensors(
         session_data,
         segments_by_session,
-        assignments_70_30,
+        assignments,
+        "val",
+        feature_dim,
+    )
+    test_feats, test_labels = _collect_split_tensors(
+        session_data,
+        segments_by_session,
+        assignments,
         "test",
         feature_dim,
     )
 
-    if len(train70_feats) == 0 or len(holdout30_feats) == 0:
-        raise RuntimeError("Empty split after initial 70/30. Check your data.")
-
-    # -----------------------------------------------------
-    # Step 4. 把 holdout30 再切成 val(10%) / test(20%)
-    #         注意：这个切分是在 frame/tensor 级别随机 1/3 vs 2/3，
-    #         不会影响那70%的训练样本是谁。
-    # -----------------------------------------------------
-    val_feats, val_labels, test_feats, test_labels = split_holdout_into_val_test(
-        holdout_feats=holdout30_feats,
-        holdout_labels=holdout30_labels,
-        seed=args.split_seed,
-        val_fraction_in_holdout=args.val_frac_in_holdout,  # 默认 1/3
-    )
-
-    if len(val_feats) == 0 or len(test_feats) == 0:
-        raise RuntimeError("Val or Test split is empty after slicing the 30%. Increase data or adjust seed.")
+    if len(train70_feats) == 0 or len(val_feats) == 0 or len(test_feats) == 0:
+        raise RuntimeError("Empty split encountered. Check your data or fold configuration.")
 
     # 打印一下各 split 的分布
     print("\n[Split sizes]")
-    print(f"Train(70%): {len(train70_feats)} samples")
-    print(f"Val(~10%): {len(val_feats)} samples")
-    print(f"Test(~20%): {len(test_feats)} samples\n")
+    print(f"Train(~{train_ratio*100:.1f}%): {len(train70_feats)} samples")
+    print(f"Val(~{val_ratio*100:.1f}%): {len(val_feats)} samples")
+    print(f"Test(~{test_ratio*100:.1f}%): {len(test_feats)} samples\n")
 
     def _print_counts(tag, lbls):
         counts = lbls.sum(dim=0).long().cpu().numpy()

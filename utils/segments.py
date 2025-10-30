@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import math
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, MutableMapping, Optional, Sequence, Set, Tuple
 
@@ -182,6 +183,97 @@ def split_segments_by_action(
     return assignments
 
 
+def _compute_split_counts(n_items: int, ratios: Sequence[float]) -> List[int]:
+    """Return non-negative counts that respect the requested ratios."""
+
+    if n_items <= 0:
+        return [0 for _ in ratios]
+
+    total_ratio = sum(ratios)
+    if total_ratio <= 0:
+        raise ValueError("Sum of ratios must be positive")
+
+    normalized = [max(0.0, r) / total_ratio for r in ratios]
+    counts = []
+    residuals = []
+    for r in normalized:
+        raw = n_items * r
+        base = int(math.floor(raw))
+        counts.append(base)
+        residuals.append(raw - base)
+
+    remaining = n_items - sum(counts)
+    if remaining > 0:
+        order = sorted(range(len(counts)), key=lambda idx: residuals[idx], reverse=True)
+        for idx in order:
+            if remaining <= 0:
+                break
+            counts[idx] += 1
+            remaining -= 1
+
+    return counts
+
+
+def assign_segments_train_val_test(
+    segments_by_session: MutableMapping[str, Dict[str, List[SegmentInfo]]],
+    *,
+    train_ratio: float,
+    test_ratio: float,
+    val_ratio: float,
+    seed: int,
+    num_folds: int,
+    fold_index: int,
+) -> Dict[str, Set[SegmentKey]]:
+    """Assign labelled segments to train/test/val splits consistently.
+
+    The assignment is performed independently for each behaviour class.  All
+    segments are first shuffled using a deterministic RNG that incorporates the
+    provided ``seed``, ``num_folds`` and ``fold_index`` so that different folds
+    result in different splits while keeping the process reproducible across
+    scripts.
+    """
+
+    if num_folds <= 0:
+        raise ValueError("num_folds must be positive")
+    if fold_index < 0 or fold_index >= num_folds:
+        raise ValueError("fold_index must satisfy 0 <= fold_index < num_folds")
+
+    grouped: Dict[str, List[Tuple[str, SegmentInfo]]] = {}
+    for session, per_action in segments_by_session.items():
+        for action, segs in per_action.items():
+            if not segs:
+                continue
+            grouped.setdefault(action, []).extend((session, seg) for seg in segs)
+
+    assignments: Dict[str, Set[SegmentKey]] = {"train": set(), "val": set(), "test": set()}
+    combined_seed = (seed + 1) * 1_000_003 + num_folds * 97 + fold_index * 1009
+    rng = random.Random(combined_seed)
+
+    for action, seg_refs in grouped.items():
+        if not seg_refs:
+            continue
+        order = list(range(len(seg_refs)))
+        rng.shuffle(order)
+
+        counts = _compute_split_counts(len(order), (train_ratio, test_ratio, val_ratio))
+        train_count, test_count, val_count = counts
+
+        boundaries = [0, train_count, train_count + test_count]
+        split_labels = (
+            ("train", boundaries[0], boundaries[1]),
+            ("test", boundaries[1], boundaries[2]),
+            ("val", boundaries[2], len(order)),
+        )
+
+        for split_name, start, end in split_labels:
+            for idx in order[start:end]:
+                session, seg = seg_refs[idx]
+                key = SegmentKey(session=session, action=action, start=seg.start, end=seg.end)
+                assignments[split_name].add(key)
+
+    return assignments
+
+
 def collect_segment_centres(
     segments_by_session: Dict[str, Dict[str, List[SegmentInfo]]],
     assignments: Dict[str, Set[SegmentKey]],
@@ -197,9 +289,10 @@ def collect_segment_centres(
     segments_by_session:
         Mapping from session name to behaviour segments.
     assignments:
-        Train/test split assignments returned by :func:`split_segments_by_action`.
+        Train/test split assignments returned by :func:`split_segments_by_action`
+        or train/val/test assignments from :func:`assign_segments_train_val_test`.
     split:
-        Which split to extract (``"train"`` or ``"test"``).
+        Which split to extract (e.g. ``"train"``, ``"val"`` or ``"test"``).
     deduplicate:
         When ``True`` the collected indices are deduplicated and returned in
         ascending order.

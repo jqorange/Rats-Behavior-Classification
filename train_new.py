@@ -546,12 +546,24 @@ def main() -> None:
     parser.add_argument("--lr-stage1", type=float, default=1e-4, help="Learning rate for stage 1")
     parser.add_argument("--lr-stage2", type=float, default=5e-5, help="Learning rate for stage 2")
     parser.add_argument("--split-seed", type=int, default=0, help="Random seed for segment-level train/test split")
+    parser.add_argument("--cross-folds", type=int, default=1, help="Total number of cross-validation folds")
+    parser.add_argument(
+        "--cross-index",
+        type=int,
+        default=0,
+        help="Index of the current cross-validation fold (0-based)",
+    )
     args = parser.parse_args()
 
     data_root = r"D:\\Jiaqi\\Datasets\\Rats\\TrainData_new"
     sessions = ["F3D5_outdoor", "F3D6_outdoor", "F5D2_outdoor", "F5D10_outdoor",  "F5D7_outdoor"]
     batch_size = 512
     session_ranges = None
+
+    if args.cross_folds <= 0:
+        raise ValueError("--cross-folds must be positive")
+    if not (0 <= args.cross_index < args.cross_folds):
+        raise ValueError("--cross-index must satisfy 0 <= index < --cross-folds")
 
     train_ds = RatsWindowDataset(
         data_root,
@@ -560,6 +572,8 @@ def main() -> None:
         session_ranges=session_ranges,
         test_ratio = 0.3,
         split_seed=args.split_seed,
+        num_folds=args.cross_folds,
+        fold_index=args.cross_index,
     )
 
     num_feat_imu = train_ds.data[sessions[0]].imu.shape[1]
