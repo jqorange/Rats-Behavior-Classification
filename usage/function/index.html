@@ -1,0 +1,1046 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+      
+      
+      
+        <link rel="prev" href="../file/">
+      
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.22">
+    
+    
+      
+        <title>Functions - Rats Behavior Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.84d31ad4.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  </head>
+  
+  
+    <body dir="ltr">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#function-reference" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Rats Behavior Docs" class="md-header__button md-logo" aria-label="Rats Behavior Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Rats Behavior Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Functions
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Rats Behavior Docs" class="md-nav__button md-logo" aria-label="Rats Behavior Docs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Rats Behavior Docs
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Home
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Install
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../Data_structure/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Data Structure
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../quick_start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Quick Start
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    Usage Guide
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            Usage Guide
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Usage Guide
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../file/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Files
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    Functions
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    Functions
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#evaluatepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      evaluate.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inferencepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      inference.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsclassifierpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/classifier.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsdeep_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/deep_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsdilated_convpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/dilated_conv.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsencoderpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/encoder.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsfusionpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/fusion.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#train_newpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train_new.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelslossespy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/losses.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsmaskingpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/masking.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi_class_classifierpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      multi_class_classifier.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi_class_inferencepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      multi_class_inference.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plot_embeddingspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      plot_embeddings.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predict_repr_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      predict_repr_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trainpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#train_repr_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train_repr_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstrainpiplinepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/TrainPipline.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilsdata_loaderpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/data_loader.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstoolspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/tools.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstrainerpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/trainer.py
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#evaluatepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      evaluate.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inferencepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      inference.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsclassifierpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/classifier.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsdeep_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/deep_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsdilated_convpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/dilated_conv.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsencoderpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/encoder.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsfusionpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/fusion.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#train_newpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train_new.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelslossespy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/losses.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#modelsmaskingpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      models/masking.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi_class_classifierpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      multi_class_classifier.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi_class_inferencepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      multi_class_inference.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#plot_embeddingspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      plot_embeddings.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#predict_repr_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      predict_repr_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#trainpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#train_repr_mlppy" class="md-nav__link">
+    <span class="md-ellipsis">
+      train_repr_mlp.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstrainpiplinepy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/TrainPipline.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilsdata_loaderpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/data_loader.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstoolspy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/tools.py
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#utilstrainerpy" class="md-nav__link">
+    <span class="md-ellipsis">
+      utils/trainer.py
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="function-reference">Function Reference</h1>
+<p>Below is a high level summary of the public functions and class methods found in the repository. They are grouped by file for easy lookup.</p>
+<h2 id="evaluatepy">evaluate.py</h2>
+<ul>
+<li><strong>load_valid_segments</strong> – read <code>results.txt</code> and return a mapping of valid label segments for each session.</li>
+<li><strong>evaluate_predictions</strong> – compute accuracy, precision, recall and F1 for each label column.</li>
+<li><strong>load_labels</strong> – read ground truth CSV labels for one session.</li>
+<li><strong>load_predictions</strong> – slice prediction CSVs using segment indices.</li>
+<li><strong>main</strong> – command line entry for batch evaluation of prediction files.</li>
+</ul>
+<h2 id="inferencepy">inference.py</h2>
+<ul>
+<li><strong>latest_checkpoint</strong> – locate the most recent encoder checkpoint.</li>
+<li><strong>main</strong> – generate representations for one or more sessions.</li>
+</ul>
+<h2 id="modelsclassifierpy">models/classifier.py</h2>
+<ul>
+<li><strong>MLPClassifier.<strong>init</strong></strong> – build a small two layer MLP.</li>
+<li><strong>MLPClassifier.forward</strong> – apply the classifier to an input tensor.</li>
+</ul>
+<h2 id="modelsdeep_mlppy">models/deep_mlp.py</h2>
+<ul>
+<li><strong>DeepMLPClassifier.<strong>init</strong></strong> – construct a deeper MLP with configurable hidden sizes.</li>
+<li><strong>DeepMLPClassifier.forward</strong> – run the classifier.</li>
+</ul>
+<h2 id="modelsdilated_convpy">models/dilated_conv.py</h2>
+<ul>
+<li><strong>SamePadConv.<strong>init</strong></strong> – convolution with automatic same padding.</li>
+<li><strong>SamePadConv.forward</strong> – run the convolution and trim extra padding.</li>
+<li><strong>ConvBlock.<strong>init</strong></strong> – residual block of two convolutions.</li>
+<li><strong>ConvBlock.forward</strong> – forward pass with GELU activations.</li>
+<li><strong>DilatedConvEncoder.<strong>init</strong></strong> – stack multiple residual blocks with increasing dilation.</li>
+<li><strong>DilatedConvEncoder.forward</strong> – encode a sequence.</li>
+</ul>
+<h2 id="modelsencoderpy">models/encoder.py</h2>
+<ul>
+<li><strong>Encoder.<strong>init</strong></strong> – linear projection, dilated conv stack and dual GRU heads.</li>
+<li><strong>Encoder.forward</strong> – encode a sequence with optional masking and return reconstruction logits.</li>
+</ul>
+<h2 id="modelsfusionpy">models/fusion.py</h2>
+<ul>
+<li><strong>EncoderFusion.<strong>init</strong></strong> – create two encoders, per-sample cross-attention and projection head.</li>
+<li><strong>EncoderFusion.forward</strong> – return a <code>FusionOutput</code> with fused, cross-modal and reconstruction tensors.</li>
+</ul>
+<h2 id="train_newpy">train_new.py</h2>
+<ul>
+<li><strong>TwoStageTrainer</strong> – two-stage curriculum alternating unsupervised and supervised batches.</li>
+<li><strong>main</strong> – command line entry for the streamlined training pipeline.</li>
+</ul>
+<h2 id="modelslossespy">models/losses.py</h2>
+<ul>
+<li><strong>hierarchical_contrastive_loss</strong> – instance and temporal contrastive loss across multiple scales.</li>
+<li><strong>instance_contrastive_loss</strong> – contrast between samples within the same batch.</li>
+<li><strong>temporal_contrastive_loss</strong> – contrast across time within each sequence.</li>
+<li><strong>multilabel_supcon_loss_bt</strong> – multi‑label supervised contrastive loss with pooling.</li>
+<li><strong>compute_contrastive_losses</strong> – dispatch supervised or unsupervised contrastive losses depending on stage.</li>
+<li><strong>CenterLoss.<strong>init</strong></strong> – maintain class centroids.</li>
+<li><strong>CenterLoss.forward</strong> – compute distance from features to class centers.</li>
+<li><strong>UncertaintyWeighting.<strong>init</strong></strong> – learn weights for combining multiple losses.</li>
+<li><strong>UncertaintyWeighting.forward</strong> – apply uncertainty weighting.</li>
+</ul>
+<h2 id="modelsmaskingpy">models/masking.py</h2>
+<ul>
+<li><strong>generate_continuous_mask</strong> – drop contiguous blocks of frames.</li>
+<li><strong>generate_binomial_mask</strong> – sample frames independently using a Bernoulli distribution.</li>
+</ul>
+<h2 id="multi_class_classifierpy">multi_class_classifier.py</h2>
+<ul>
+<li><strong>load_valid_segments</strong> – parse <code>results.txt</code> for valid label regions.</li>
+<li><strong>load_session_data</strong> – load features and labels for a session.</li>
+<li><strong>load_unlabeled_data</strong> – return data outside labelled segments for self training.</li>
+<li><strong>build_datasets</strong> – assemble training, test and unlabeled datasets.</li>
+<li><strong>evaluate</strong> – compute accuracy and F1 for a data loader.</li>
+<li><strong>pseudo_label</strong> – generate pseudo labels from high confidence predictions.</li>
+<li><strong>self_training</strong> – iterative pseudo label training loop.</li>
+<li><strong>main</strong> – command line interface for self training.</li>
+</ul>
+<h2 id="multi_class_inferencepy">multi_class_inference.py</h2>
+<ul>
+<li><strong>load_representation</strong> – load a representation file from disk.</li>
+<li><strong>run_inference</strong> – run a saved MLP on one session and save predictions.</li>
+<li><strong>main</strong> – script entry point.</li>
+</ul>
+<h2 id="plot_embeddingspy">plot_embeddings.py</h2>
+<ul>
+<li><strong>load_channel_names</strong> – read channel names for plotting.</li>
+<li><strong>compute_cluster_metrics</strong> – evaluate cluster purity in PCA space.</li>
+<li><strong>main</strong> – draw PCA plot from representation files.</li>
+</ul>
+<h2 id="predict_repr_mlppy">predict_repr_mlp.py</h2>
+<ul>
+<li><strong>load_model</strong> – load a representation‑level MLP.</li>
+<li><strong>main</strong> – perform inference on multiple sessions.</li>
+</ul>
+<h2 id="trainpy">train.py</h2>
+<ul>
+<li><strong>main</strong> – create a <code>TrainPipline</code> and run the training workflow.</li>
+</ul>
+<h2 id="train_repr_mlppy">train_repr_mlp.py</h2>
+<ul>
+<li><strong>load_valid_segments</strong> – parse <code>results.txt</code> for valid label regions.</li>
+<li><strong>load_session_data</strong> – load representations and labels for supervised training.</li>
+<li><strong>load_unlabeled_data</strong> – load unlabeled representations.</li>
+<li><strong>build_datasets</strong> – prepare training and test sets with optional unlabeled data.</li>
+<li><strong>evaluate</strong> – compute accuracy and F1 of the deep MLP.</li>
+<li><strong>pseudo_label</strong> – select high confidence samples as pseudo labels.</li>
+<li><strong>self_training</strong> – multi‑step self training loop.</li>
+<li><strong>main</strong> – command line entry.</li>
+</ul>
+<h2 id="utilstrainpiplinepy">utils/TrainPipline.py</h2>
+<ul>
+<li><strong>TrainPipline.<strong>init</strong></strong> – set paths, sessions and basic parameters.</li>
+<li><strong>TrainPipline._setup_device</strong> – choose CPU or CUDA device.</li>
+<li><strong>TrainPipline.load_and_prepare_data</strong> – load, truncate and align all sessions.</li>
+<li><strong>prepare_session</strong> – inner helper used during loading.</li>
+<li><strong>TrainPipline.initialize_trainer</strong> – create the <code>FusionTrainer</code> with given hyper parameters.</li>
+<li><strong>TrainPipline.test_model_components</strong> – sanity check that the model runs on a few samples.</li>
+<li><strong>TrainPipline.train_model</strong> – run the three‑stage training using the trainer.</li>
+<li><strong>TrainPipline.evaluate_model</strong> – evaluate the trained model on the test set.</li>
+<li><strong>TrainPipline.run_full_pipeline</strong> – convenience function executing the entire workflow.</li>
+</ul>
+<h2 id="utilsdata_loaderpy">utils/data_loader.py</h2>
+<ul>
+<li><strong>DataLoader.<strong>init</strong></strong> – configure paths for IMU, DLC and label files.</li>
+<li><strong>DataLoader.load_original_data</strong> – read unsupervised IMU and DLC arrays.</li>
+<li><strong>DataLoader.load_supervised_data</strong> – read supervised segments and labels.</li>
+<li><strong>DataLoader.load_all_data</strong> – call both loading functions and return a summary.</li>
+<li><strong>DataLoader.get_data_summary</strong> – return dictionaries of all loaded arrays.</li>
+<li><strong>DataLoader.get_session_data</strong> – fetch data for a single session.</li>
+<li><strong>DataLoader.print_data_info</strong> – print statistics about every session.</li>
+</ul>
+<h2 id="utilstoolspy">utils/tools.py</h2>
+<ul>
+<li><strong>take_per_row</strong> – slice a batch of sequences starting at different offsets.</li>
+<li><strong>take_per_row_safe</strong> – safe version that pads beyond sequence ends.</li>
+<li><strong>take_per_row_vectorized</strong> – vectorised slicing implementation.</li>
+<li><strong>test_take_per_row</strong> – demonstration of the slicing functions.</li>
+</ul>
+<h2 id="utilstrainerpy">utils/trainer.py</h2>
+<ul>
+<li><strong>FusionTrainer.<strong>init</strong></strong> – build encoders, classifier and optimisers.</li>
+<li><strong>train_contrastive_phase</strong> – run a contrastive learning stage.</li>
+<li><strong>train_stage3</strong> – stage 3 training combining supervised and unsupervised losses with KL distribution alignment.</li>
+<li><strong>train_contrastive_multi_session</strong> – unsupervised training mixing sessions per batch.</li>
+<li><strong>train_mlp_phase</strong> – supervised MLP training after the encoders are frozen.</li>
+<li><strong>fit</strong> – execute the full three‑stage curriculum.</li>
+<li><strong>init_stage2</strong> – load adapters and freeze encoders for stage 2.</li>
+<li><strong>init_stage3</strong> – prepare the model for stage 3 fine‑tuning.</li>
+<li><strong>encode</strong> – encode IMU and DLC sequences without classification.</li>
+<li><strong>encode_state1</strong> – encode using the session‑aware adapters from stage 1.</li>
+<li><strong>predict</strong> – run the MLP classifier on new data.</li>
+<li><strong>save</strong> – save encoder and classifier checkpoints.</li>
+<li><strong>load</strong> – load checkpoints.</li>
+<li><strong>load_stage2</strong> – load only the encoder for stage 2 inference.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "../..", "features": [], "search": "../../assets/javascripts/workers/search.973d3a69.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.f55a23d4.min.js"></script>
+      
+    
+  </body>
+</html>
