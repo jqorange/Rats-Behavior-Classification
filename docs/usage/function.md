@@ -30,12 +30,12 @@ Below is a high level summary of the public functions and class methods found in
 * **DilatedConvEncoder.forward** – encode a sequence.
 
 ## models/encoder.py
-* **Encoder.__init__** – linear projection, dilated conv stack and dual GRU heads.
+* **Encoder.__init__** – linear projection, dilated conv stack and a GRU reconstruction head.
 * **Encoder.forward** – encode a sequence with optional masking and return reconstruction logits.
 
-## models/fusion.py
-* **EncoderFusion.__init__** – create two encoders, per-sample cross-attention and projection head.
-* **EncoderFusion.forward** – return a `FusionOutput` with fused, cross-modal and reconstruction tensors.
+## models/single_modal.py
+* **SingleModalModel.__init__** – wrap the encoder with projection, masking augmentation and normalisation.
+* **SingleModalModel.forward** – return embeddings, features and reconstruction outputs for one modality.
 
 ## train_new.py
 * **TwoStageTrainer** – two-stage curriculum alternating unsupervised and supervised batches.

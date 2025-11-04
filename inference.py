@@ -6,7 +6,7 @@ import torch
 import pandas as pd
 import numpy as np
 
-from models.fusion import EncoderFusion
+from models.single_modal import SingleModalModel
 from utils.checkpoint import load_checkpoint
 from utils.segments import (
     SegmentInfo,
@@ -35,6 +35,8 @@ def _infer_model_config(state: dict[str, torch.Tensor]) -> tuple[int, int]:
 
     d_model_src = _first_tensor(
         [
+            "encoder.input_proj.weight",
+            "encoder.norm_in.weight",
             "encoderA.adapter.linear.weight",
             "encoderA.input_proj.weight",
             "encoderA.norm_in.weight",
@@ -120,57 +122,38 @@ def run_inference(
     *,
     mode: str = 'full',          # 'full' or 'labeled'
     window: str = '64',          # '64' or 'multi'
-    index: Optional[int] = None,
     device: Optional[str] = None,
     out_dir: str = 'representations',
     batch_size: int = 128,
     stride: int = 1,             # 滑动步长，默认逐帧
-    fuse_mode: str = 'both',     # 'imu', 'dlc', or 'both'
+    modality: str = 'imu',
     segment_split: str = 'test',
     segment_seed: int = 0,
     segment_test_ratio: float = 0.2,
 ) -> None:
-    """Generate representations for sessions using a saved checkpoint.
-
-    ``fuse_mode`` controls which modalities contribute to cross attention:
-    ``'imu'`` uses only IMU features (A with A_to_B), ``'dlc'`` uses only DLC
-    features (B with B_to_A) and ``'both'`` fuses IMU with DLC (A with B).
-    """
+    """Generate representations for sessions using a saved checkpoint."""
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
     os.makedirs(out_dir, exist_ok=True)
 
     # Load first session to infer feature dims
     imu0, dlc0, _ = _load_session_arrays(data_path, sessions[0])
-    num_imu, num_dlc = imu0.shape[1], dlc0.shape[1]
+    modality = modality.lower()
+    if modality not in {'imu', 'dlc'}:
+        raise ValueError("modality must be 'imu' or 'dlc'")
+    num_features = imu0.shape[1] if modality == 'imu' else dlc0.shape[1]
 
     ckpt = torch.load(ckpt_path, map_location='cpu')
     state = ckpt.get('model_state', {})
-    d_model, num_sessions = _infer_model_config(state)
+    d_model, _ = _infer_model_config(state)
 
-    model = EncoderFusion(
-        N_feat_A=num_imu,
-        N_feat_B=num_dlc,
+    model = SingleModalModel(
+        num_features,
         mask_type=None,
         d_model=d_model,
-        nhead=4,
-        num_sessions=num_sessions,
     ).to(device)
     model.eval()
 
-    _, stage = load_checkpoint(model, model.projection, optimizer=None, path=ckpt_path)
-    has_set_mode = hasattr(model.projection, 'set_mode')
-    if has_set_mode:
-        if stage == 1:
-            model.projection.set_mode('aware')
-            if index is None:
-                raise ValueError('Stage1 checkpoint requires --index for projector embedding')
-        else:
-            model.projection.set_mode('align')
-            if index is None:
-                index = 0
-    else:
-        if index is None:
-            index = 0
+    _, _stage = load_checkpoint(model, model.projection, optimizer=None, path=ckpt_path)
 
     if window == 'multi':
         Ts = [16, 32, 64, 128]
@@ -212,7 +195,8 @@ def run_inference(
 
     for sess in sessions:
         imu, dlc, label_df = _load_session_arrays(data_path, sess)
-        length = min(len(imu), len(dlc))
+        source = imu if modality == 'imu' else dlc
+        length = len(source)
         if mode == 'labeled':
             centres = [c for c in labelled_indices.get(sess, []) if c < length]
         else:
@@ -231,13 +215,10 @@ def run_inference(
                 centres_b = centres[i:i + batch_size]
 
                 # 抽窗在 CPU 上完成，随后把这一小批移到 device
-                imu_win_b = _extract_windows(imu, centres_b, T).to(device, non_blocking=True)
-                dlc_win_b = _extract_windows(dlc, centres_b, T).to(device, non_blocking=True)
-                sess_idx_b = torch.full((len(centres_b),), index, dtype=torch.long, device=device)
+                win_b = _extract_windows(source, centres_b, T).to(device, non_blocking=True)
 
-                # 前向得到时序表征 (B, T, D)
-                output = model(imu_win_b, dlc_win_b, session_idx=sess_idx_b, attn_mode=fuse_mode)
-                feat_seq_b = output.fused
+                output = model(win_b)
+                feat_seq_b = output.embedding
 
                 # ==== 关键修改：时间维做 max pooling 得到 (B, D) ====
                 # 原来是取中心帧：feat_b = feat_seq_b[:, T // 2]
@@ -248,7 +229,7 @@ def run_inference(
                 feats_T_batches.append(feat_b)
 
                 # 及时释放显存
-                del imu_win_b, dlc_win_b, sess_idx_b, output, feat_seq_b, feat_b
+                del win_b, output, feat_seq_b, feat_b
                 if isinstance(device, str) and device.startswith('cuda'):
                     torch.cuda.empty_cache()
 
@@ -273,13 +254,11 @@ def main() -> None:
                    help='Session names')
     p.add_argument('--mode', choices=['full', 'labeled'], default='full')
     p.add_argument('--window', choices=['64', 'multi'], default='multi')
-    p.add_argument('--index', type=int, default=0, help='Compatibility placeholder for historical adapters')
+    p.add_argument('--modality', choices=['imu', 'dlc'], default='imu', help='Modality to encode')
     p.add_argument('--device', default="cuda")
     p.add_argument('--out_dir', default='representations')
     p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')
     p.add_argument('--stride', type=int, default=1, help='Sliding stride for centers (1 = per frame)')
-    p.add_argument('--fuse_mode', choices=['imu', 'dlc', 'both'], default='both',
-                   help='Cross-attention mode during inference')
     p.add_argument('--segment-split', choices=['train', 'test'], default='test',
                    help='Use training or testing segments when mode="labeled"')
     p.add_argument('--split-seed', type=int, default=0, help='Random seed for segment splitting')
@@ -293,12 +272,11 @@ def main() -> None:
         args.sessions,
         mode=args.mode,
         window=args.window,
-        index=args.index,
         device=args.device,
         out_dir=args.out_dir,
         batch_size=args.batch_size,
         stride=args.stride,
-        fuse_mode=args.fuse_mode,
+        modality=args.modality,
         segment_split=args.segment_split,
         segment_seed=args.split_seed,
         segment_test_ratio=args.segment_test_ratio,

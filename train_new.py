@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from models.fusion import EncoderFusion
+from models.single_modal import SingleModalModel
 from models.losses import (
     gaussian_kl_divergence,
     gaussian_kl_divergence_masked,
@@ -43,16 +43,19 @@ class TwoStageTrainer:
         *,
         stage_lrs: Optional[Dict[int, float]] = None,
         loss_weights: Optional[Dict[str, Dict[str, float]]] = None,
+        modality: str = "imu",
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.d_model = 64
-        self.model = EncoderFusion(
-            N_feat_A=num_features_imu,
-            N_feat_B=num_features_dlc,
+        modality = modality.lower()
+        if modality not in {"imu", "dlc"}:
+            raise ValueError("modality must be either 'imu' or 'dlc'")
+        self.modality = modality
+        feature_dim = num_features_imu if modality == "imu" else num_features_dlc
+        self.model = SingleModalModel(
+            feature_dim,
             mask_type="binomial",
             d_model=self.d_model,
-            nhead=4,
-            num_sessions=num_sessions,
         ).to(self.device)
 
         self.stage_lrs: Dict[int, float] = {1: 1e-3, 2: 5e-4}
@@ -65,13 +68,11 @@ class TwoStageTrainer:
         self.unsup_loss_weights = {
             "contrast": 1.0,
             "kl": 0.1,
-            "align": 0.1,
             "recon": 0.1,
         }
         self.sup_loss_weights = {
             "contrast": 1.0,
             "kl": 0.1,
-            "align": 0.1,
             "recon": 0.1,
         }
         if loss_weights:
@@ -118,6 +119,10 @@ class TwoStageTrainer:
             stats[prefix + key] += float(value)
             counts[prefix + key] += 1
 
+    def _select_modality(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        key = "imu" if self.modality == "imu" else "dlc"
+        return self._sanitize(batch[key].to(self.device))
+
     def _prepare_batches(
         self,
         dataset: RatsWindowDataset,
@@ -156,21 +161,15 @@ class TwoStageTrainer:
         self,
         batch: Dict[str, torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
-        imu = self._sanitize(batch["imu"].to(self.device))
-        dlc = self._sanitize(batch["dlc"].to(self.device))
+        data = self._select_modality(batch)
         mask = batch.get("mask")
         if mask is not None:
             mask = mask.to(self.device)
-        session_idx = batch.get("session_idx")
-        if session_idx is not None:
-            session_idx = session_idx.to(self.device, dtype=torch.long)
 
-        B, T, _ = imu.shape
+        B, T, _ = data.shape
         if T <= 5:
-            zero = imu.new_tensor(0.0)
+            zero = data.new_tensor(0.0)
             metrics = {
-                "align_nll": zero,
-                "align_kl": zero,
                 "reconstruction_nll": zero,
                 "reconstruction_kl": zero,
                 "unsupervised_contrastive": zero,
@@ -187,70 +186,47 @@ class TwoStageTrainer:
             low=-crop_eleft,
             high=T - crop_eright + 1,
             size=(B,),
-            device=imu.device,
+            device=data.device,
         )
 
-        imu_crop1 = take_per_row(imu, crop_offset + crop_eleft, crop_right - crop_eleft)
-        dlc_crop1 = take_per_row(dlc, crop_offset + crop_eleft, crop_right - crop_eleft)
-        imu_crop2 = take_per_row(imu, crop_offset + crop_left, crop_eright - crop_left)
-        dlc_crop2 = take_per_row(dlc, crop_offset + crop_left, crop_eright - crop_left)
+        crop1 = take_per_row(data, crop_offset + crop_eleft, crop_right - crop_eleft)
+        crop2 = take_per_row(data, crop_offset + crop_left, crop_eright - crop_left)
 
         crop_l = int(crop_right - crop_left)
         with torch.amp.autocast("cuda", enabled=(self.device == "cuda")):
-            out1 = self.model(imu_crop1, dlc_crop1, session_idx=session_idx)
-            out2 = self.model(imu_crop2, dlc_crop2, session_idx=session_idx)
+            out1 = self.model(crop1)
+            out2 = self.model(crop2)
 
-            emb1 = out1.fused[:, -crop_l:]
-            emb2 = out2.fused[:, :crop_l]
+            emb1 = out1.embedding[:, -crop_l:]
+            emb2 = out2.embedding[:, :crop_l]
             jitter_std = 0.01
             emb1 = F.normalize(emb1 + torch.randn_like(emb1) * jitter_std, dim=-1)
             emb2 = F.normalize(emb2 + torch.randn_like(emb2) * jitter_std, dim=-1)
 
-            imu_self = out1.imu_self[:, -crop_l:]
-            dlc_self = out1.dlc_self[:, -crop_l:]
-            imu_to_dlc = out1.imu_to_dlc[:, -crop_l:]
-            dlc_to_imu = out1.dlc_to_imu[:, -crop_l:]
-
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
-            loss_align_nll = 0.5 * (
-                sequential_next_step_nll(imu_to_dlc, dlc_self)
-                + sequential_next_step_nll(dlc_to_imu, imu_self)
+            recon1 = out1.reconstruction[:, -crop_l:]
+            recon2 = out2.reconstruction[:, :crop_l]
+            target1 = crop1[:, -crop_l:]
+            target2 = crop2[:, :crop_l]
+            loss_recon_nll = 0.5 * (
+                sequential_next_step_nll(recon1, target1)
+                + sequential_next_step_nll(recon2, target2)
             )
-            loss_align_kl = 0.5 * (
-                gaussian_kl_divergence(imu_to_dlc, dlc_self)
-                + gaussian_kl_divergence(dlc_to_imu, imu_self)
-            )
-
-            recon_a = out1.imu_recon[:, -crop_l:]
-            recon_b = out1.dlc_recon[:, -crop_l:]
-            recon_a2 = out2.imu_recon[:, :crop_l]
-            recon_b2 = out2.dlc_recon[:, :crop_l]
-            loss_recon_nll = 0.25 * (
-                sequential_next_step_nll(recon_a, imu_crop1[:, -crop_l:])
-                + sequential_next_step_nll(recon_b, dlc_crop1[:, -crop_l:])
-                + sequential_next_step_nll(recon_a2, imu_crop2[:, :crop_l])
-                + sequential_next_step_nll(recon_b2, dlc_crop2[:, :crop_l])
-            )
-            loss_recon_kl = 0.25 * (
-                gaussian_kl_divergence(recon_a, imu_crop1[:, -crop_l:])
-                + gaussian_kl_divergence(recon_b, dlc_crop1[:, -crop_l:])
-                + gaussian_kl_divergence(recon_a2, imu_crop2[:, :crop_l])
-                + gaussian_kl_divergence(recon_b2, dlc_crop2[:, :crop_l])
+            loss_recon_kl = 0.5 * (
+                gaussian_kl_divergence(recon1, target1)
+                + gaussian_kl_divergence(recon2, target2)
             )
 
             unsup_w = self.unsup_loss_weights
             loss_unsup = (
                 unsup_w.get("contrast", 1.0) * loss_contrast
-                + unsup_w.get("align", 1.0) * loss_align_nll
-                + unsup_w.get("kl", 1.0) * loss_align_kl
-                + unsup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
+                + unsup_w.get("recon", 1.0) * loss_recon_nll
+                + unsup_w.get("kl", 1.0) * loss_recon_kl
             )
 
             loss_total = loss_unsup
 
         metrics = {
-            "align_nll": loss_align_nll.detach(),
-            "align_kl": loss_align_kl.detach(),
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "unsupervised_contrastive": loss_contrast.detach(),
@@ -258,19 +234,14 @@ class TwoStageTrainer:
         return loss_total, metrics
 
     def _step_sup(self, batch: Dict[str, torch.Tensor]) -> Tuple[Optional[torch.Tensor], Dict[str, torch.Tensor]]:
-        imu = self._sanitize(batch["imu"].to(self.device))
-        dlc = self._sanitize(batch["dlc"].to(self.device))
+        data = self._select_modality(batch)
         labels = batch["label"].to(self.device)
         mask = batch.get("mask")
         if mask is not None:
             mask = mask.to(self.device)
-        session_idx = batch.get("session_idx")
-        if session_idx is not None:
-            session_idx = session_idx.to(self.device, dtype=torch.long)
 
-        scale = torch.empty(imu.size(0), 1, 1, device=imu.device).uniform_(0.8, 1.2)
-        imu = imu * scale
-        dlc = dlc * scale
+        scale = torch.empty(data.size(0), 1, 1, device=data.device).uniform_(0.8, 1.2)
+        data = data * scale
 
         if self.class_weights is not None:
             weights = self.class_weights.to(labels.device)
@@ -278,53 +249,35 @@ class TwoStageTrainer:
             mix_idx = torch.multinomial(sample_w, labels.size(0), replacement=True)
             partner_idx = torch.randint(0, labels.size(0), (len(mix_idx),), device=labels.device)
             lam = 0.5
-            imu_mix = lam * imu[mix_idx] + (1 - lam) * imu[partner_idx]
-            dlc_mix = lam * dlc[mix_idx] + (1 - lam) * dlc[partner_idx]
+            data_mix = lam * data[mix_idx] + (1 - lam) * data[partner_idx]
             label_mix = torch.clamp(labels[mix_idx] + labels[partner_idx], 0, 1)
-            session_mix = session_idx[mix_idx] if session_idx is not None else None
             if mask is not None:
                 mask_mix = mask[mix_idx] & mask[partner_idx]
                 mask = torch.cat([mask, mask_mix], dim=0)
-            imu = torch.cat([imu, imu_mix], dim=0)
-            dlc = torch.cat([dlc, dlc_mix], dim=0)
+            data = torch.cat([data, data_mix], dim=0)
             labels = torch.cat([labels, label_mix], dim=0)
-            if session_idx is not None:
-                session_idx = torch.cat([session_idx, session_mix], dim=0)
 
         with torch.amp.autocast("cuda", enabled=(self.device == "cuda")):
-            out = self.model(imu, dlc, session_idx=session_idx, mask=mask)
+            out = self.model(data, mask=mask)
             jitter_std = 0.01
-            emb = out.fused + torch.randn_like(out.fused) * jitter_std
+            emb = out.embedding + torch.randn_like(out.embedding) * jitter_std
             emb = F.normalize(emb, dim=-1)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
-            loss_align_nll = 0.5 * (
-                sequential_next_step_nll(out.imu_to_dlc, out.dlc_self)
-                + sequential_next_step_nll(out.dlc_to_imu, out.imu_self)
-            )
-            loss_align_kl = 0.5 * (
-                gaussian_kl_divergence(out.imu_to_dlc, out.dlc_self)
-                + gaussian_kl_divergence(out.dlc_to_imu, out.imu_self)
-            )
             loss_recon_nll = 0.5 * (
-                sequential_next_step_nll(out.imu_recon, imu, mask)
-                + sequential_next_step_nll(out.dlc_recon, dlc, mask)
+                sequential_next_step_nll(out.reconstruction, data, mask)
             )
             loss_recon_kl = 0.5 * (
-                gaussian_kl_divergence_masked(out.imu_recon, imu, mask)
-                + gaussian_kl_divergence_masked(out.dlc_recon, dlc, mask)
+                gaussian_kl_divergence_masked(out.reconstruction, data, mask)
             )
             sup_w = self.sup_loss_weights
             loss_total = (
                 sup_w.get("contrast", 1.0) * loss_sup
-                + sup_w.get("align", 1.0) * loss_align_nll
-                + sup_w.get("kl", 1.0) * loss_align_kl
-                + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
+                + sup_w.get("recon", 1.0) * loss_recon_nll
+                + sup_w.get("kl", 1.0) * loss_recon_kl
             )
 
         metrics = {
-            "align_nll": loss_align_nll.detach(),
-            "align_kl": loss_align_kl.detach(),
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "supervised_contrastive": loss_sup.detach(),
@@ -385,10 +338,6 @@ class TwoStageTrainer:
                     sup_contrast=float(metrics_s.get("supervised_contrastive", 0.0)),
                 )
 
-        align_nll_sum = stats.get("unsup_align_nll", 0.0) + stats.get("sup_align_nll", 0.0)
-        align_nll_count = counts.get("unsup_align_nll", 0) + counts.get("sup_align_nll", 0)
-        align_kl_sum = stats.get("unsup_align_kl", 0.0) + stats.get("sup_align_kl", 0.0)
-        align_kl_count = counts.get("unsup_align_kl", 0) + counts.get("sup_align_kl", 0)
         recon_nll_sum = stats.get("unsup_reconstruction_nll", 0.0) + stats.get("sup_reconstruction_nll", 0.0)
         recon_nll_count = counts.get("unsup_reconstruction_nll", 0) + counts.get("sup_reconstruction_nll", 0)
         recon_kl_sum = stats.get("unsup_reconstruction_kl", 0.0) + stats.get("sup_reconstruction_kl", 0.0)
@@ -399,12 +348,6 @@ class TwoStageTrainer:
         sup_contrast_count = counts.get("sup_supervised_contrastive", 0)
 
         final_metrics: Dict[str, float] = {}
-        final_metrics["alignNLL_loss"] = (
-            align_nll_sum / align_nll_count if align_nll_count > 0 else 0.0
-        )
-        final_metrics["alignKL_loss"] = (
-            align_kl_sum / align_kl_count if align_kl_count > 0 else 0.0
-        )
         final_metrics["reconstructionNLL_loss"] = (
             recon_nll_sum / recon_nll_count if recon_nll_count > 0 else 0.0
         )
@@ -553,6 +496,12 @@ def main() -> None:
         default=0,
         help="Index of the current cross-validation fold (0-based)",
     )
+    parser.add_argument(
+        "--modality",
+        choices=["imu", "dlc"],
+        default="imu",
+        help="Which modality to use for single-encoder training",
+    )
     args = parser.parse_args()
 
     data_root = r"D:\\Jiaqi\\Datasets\\Rats\\TrainData_new"
@@ -585,6 +534,7 @@ def main() -> None:
         num_feat_dlc,
         num_sessions,
         stage_lrs={1: args.lr_stage1, 2: args.lr_stage2},
+        modality=args.modality,
     )
 
     n_workers_preproc = 1

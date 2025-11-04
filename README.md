@@ -9,13 +9,13 @@ Web Link: [https://jqorange.github.io/Rats_Behavior_Classification/](https://jqo
 
 ## Model Architecture
 
-Two encoders process IMU and DLC time-series features. Each encoder consists of:
+The revamped pipeline is single-modal: a lightweight encoder consumes either IMU **or** DLC features at a time. The encoder is composed of
 
-1. **Linear stem** – projection mapping raw features to `d_model` dimensions.
-2. **Dilated Conv Block** – stacked dilated convolutions (`models/dilated_conv.py`) to capture local patterns.
-3. **GRU heads** – one predicts the representation in the other modality while the second reconstructs the current modality.
+1. **Linear stem** – projects raw features to the shared latent dimension `d_model`.
+2. **Dilated Conv Block** – stacked dilated convolutions (`models/dilated_conv.py`) that model local temporal context.
+3. **GRU reconstruction head** – decodes the latent representation back to the original feature space for the reconstruction loss.
 
-`EncoderFusion` applies multi-head cross attention to combine the two embeddings, then uses gated residual connections to produce the final sequence representation.
+`models/single_modal.py` wraps the encoder with a projection head used for contrastive learning. During training Stage 1 performs unsupervised contrastive learning plus reconstruction. Stage 2 alternates unsupervised and supervised contrastive batches on the same single-modality encoder.
 
 ## Training Pipeline
 
@@ -68,9 +68,8 @@ python plot_embeddings.py --rep_dir representations --sessions F3D5_outdoor
 
 ## Parameters
 
-* `N_feat_A` / `N_feat_B`: feature dimensions for IMU and DLC inputs.
-* `d_model`: hidden dimension for the encoders and cross attention (default 128).
-* `nhead`: number of attention heads (default 4).
+* `num_features`: dimensionality of the chosen modality (IMU or DLC).
+* `d_model`: hidden dimension for the encoder and projection head (default 128).
 * `hidden_dim`: size of the MLP classifier's hidden layer.
 * `batch_size`: training batch size.
 * `contrastive_epochs` / `mlp_epochs`: iterations for each phase of a cycle.
