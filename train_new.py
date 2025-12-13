@@ -48,10 +48,15 @@ class TwoStageTrainer:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.d_model = 64
         modality = modality.lower()
-        if modality not in {"imu", "dlc"}:
-            raise ValueError("modality must be either 'imu' or 'dlc'")
+        if modality not in {"imu", "dlc", "both"}:
+            raise ValueError("modality must be either 'imu', 'dlc', or 'both'")
         self.modality = modality
-        feature_dim = num_features_imu if modality == "imu" else num_features_dlc
+        if modality == "both":
+            feature_dim = num_features_imu + num_features_dlc
+        elif modality == "imu":
+            feature_dim = num_features_imu
+        else:
+            feature_dim = num_features_dlc
         self.model = SingleModalModel(
             feature_dim,
             mask_type="binomial",
@@ -120,6 +125,13 @@ class TwoStageTrainer:
             counts[prefix + key] += 1
 
     def _select_modality(self, batch: Dict[str, torch.Tensor]) -> torch.Tensor:
+        if self.modality == "both":
+            return self._sanitize(
+                torch.cat(
+                    [batch["imu"].to(self.device), batch["dlc"].to(self.device)],
+                    dim=-1,
+                )
+            )
         key = "imu" if self.modality == "imu" else "dlc"
         return self._sanitize(batch[key].to(self.device))
 
@@ -498,7 +510,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--modality",
-        choices=["imu", "dlc"],
+        choices=["imu", "dlc", "both"],
         default="imu",
         help="Which modality to use for single-encoder training",
     )
