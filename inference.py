@@ -138,9 +138,14 @@ def run_inference(
     # Load first session to infer feature dims
     imu0, dlc0, _ = _load_session_arrays(data_path, sessions[0])
     modality = modality.lower()
-    if modality not in {'imu', 'dlc'}:
-        raise ValueError("modality must be 'imu' or 'dlc'")
-    num_features = imu0.shape[1] if modality == 'imu' else dlc0.shape[1]
+    if modality not in {'imu', 'dlc', 'both'}:
+        raise ValueError("modality must be 'imu', 'dlc', or 'both'")
+    if modality == 'both':
+        num_features = imu0.shape[1] + dlc0.shape[1]
+    elif modality == 'imu':
+        num_features = imu0.shape[1]
+    else:
+        num_features = dlc0.shape[1]
 
     ckpt = torch.load(ckpt_path, map_location='cpu')
     state = ckpt.get('model_state', {})
@@ -195,7 +200,12 @@ def run_inference(
 
     for sess in sessions:
         imu, dlc, label_df = _load_session_arrays(data_path, sess)
-        source = imu if modality == 'imu' else dlc
+        if modality == 'both':
+            source = torch.cat([imu, dlc], dim=1)
+        elif modality == 'imu':
+            source = imu
+        else:
+            source = dlc
         length = len(source)
         if mode == 'labeled':
             centres = [c for c in labelled_indices.get(sess, []) if c < length]
@@ -254,7 +264,7 @@ def main() -> None:
                    help='Session names')
     p.add_argument('--mode', choices=['full', 'labeled'], default='full')
     p.add_argument('--window', choices=['64', 'multi'], default='multi')
-    p.add_argument('--modality', choices=['imu', 'dlc'], default='imu', help='Modality to encode')
+    p.add_argument('--modality', choices=['imu', 'dlc', 'both'], default='imu', help='Modality to encode')
     p.add_argument('--device', default="cuda")
     p.add_argument('--out_dir', default='representations')
     p.add_argument('--batch_size', type=int, default=1024, help='Inference batch size')
