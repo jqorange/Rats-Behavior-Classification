@@ -64,27 +64,18 @@ class TwoStageTrainer:
         self.temporal_unit = 3
         self.unsup_loss_weights = {
             "contrast": 1.0,
-            "kl": 0.1,
-            "align": 0.1,
             "recon": 0.1,
         }
         self.sup_loss_weights = {
             "contrast": 1.0,
-            "kl": 0.1,
-            "align": 0.1,
             "recon": 0.1,
         }
         if loss_weights:
             unsup_cfg = loss_weights.get("unsup", {})
-            unsup_updates = {
-                ("kl" if k == "cs" else k): float(v)
-                for k, v in unsup_cfg.items()
-            }
+            unsup_updates = {k: float(v) for k, v in unsup_cfg.items()}
             self.unsup_loss_weights.update(unsup_updates)
             sup_cfg = loss_weights.get("sup", {})
-            sup_updates = {
-                ("kl" if k == "cs" else k): float(v) for k, v in sup_cfg.items()
-            }
+            sup_updates = {k: float(v) for k, v in sup_cfg.items()}
             self.sup_loss_weights.update(sup_updates)
 
         self.total_epochs = 0
@@ -169,8 +160,6 @@ class TwoStageTrainer:
         if T <= 5:
             zero = imu.new_tensor(0.0)
             metrics = {
-                "align_nll": zero,
-                "align_kl": zero,
                 "reconstruction_nll": zero,
                 "reconstruction_kl": zero,
                 "unsupervised_contrastive": zero,
@@ -206,20 +195,7 @@ class TwoStageTrainer:
             emb1 = F.normalize(emb1 + torch.randn_like(emb1) * jitter_std, dim=-1)
             emb2 = F.normalize(emb2 + torch.randn_like(emb2) * jitter_std, dim=-1)
 
-            imu_self = out1.imu_self[:, -crop_l:]
-            dlc_self = out1.dlc_self[:, -crop_l:]
-            imu_to_dlc = out1.imu_to_dlc[:, -crop_l:]
-            dlc_to_imu = out1.dlc_to_imu[:, -crop_l:]
-
             loss_contrast = hierarchical_contrastive_loss(emb1, emb2, temporal_unit=self.temporal_unit)
-            loss_align_nll = 0.5 * (
-                sequential_next_step_nll(imu_to_dlc, dlc_self)
-                + sequential_next_step_nll(dlc_to_imu, imu_self)
-            )
-            loss_align_kl = 0.5 * (
-                gaussian_kl_divergence(imu_to_dlc, dlc_self)
-                + gaussian_kl_divergence(dlc_to_imu, imu_self)
-            )
 
             recon_a = out1.imu_recon[:, -crop_l:]
             recon_b = out1.dlc_recon[:, -crop_l:]
@@ -241,16 +217,12 @@ class TwoStageTrainer:
             unsup_w = self.unsup_loss_weights
             loss_unsup = (
                 unsup_w.get("contrast", 1.0) * loss_contrast
-                + unsup_w.get("align", 1.0) * loss_align_nll
-                + unsup_w.get("kl", 1.0) * loss_align_kl
                 + unsup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
             loss_total = loss_unsup
 
         metrics = {
-            "align_nll": loss_align_nll.detach(),
-            "align_kl": loss_align_kl.detach(),
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "unsupervised_contrastive": loss_contrast.detach(),
@@ -298,14 +270,6 @@ class TwoStageTrainer:
             emb = F.normalize(emb, dim=-1)
 
             loss_sup = multilabel_supcon_loss_bt(emb, labels)
-            loss_align_nll = 0.5 * (
-                sequential_next_step_nll(out.imu_to_dlc, out.dlc_self)
-                + sequential_next_step_nll(out.dlc_to_imu, out.imu_self)
-            )
-            loss_align_kl = 0.5 * (
-                gaussian_kl_divergence(out.imu_to_dlc, out.dlc_self)
-                + gaussian_kl_divergence(out.dlc_to_imu, out.imu_self)
-            )
             loss_recon_nll = 0.5 * (
                 sequential_next_step_nll(out.imu_recon, imu, mask)
                 + sequential_next_step_nll(out.dlc_recon, dlc, mask)
@@ -317,14 +281,10 @@ class TwoStageTrainer:
             sup_w = self.sup_loss_weights
             loss_total = (
                 sup_w.get("contrast", 1.0) * loss_sup
-                + sup_w.get("align", 1.0) * loss_align_nll
-                + sup_w.get("kl", 1.0) * loss_align_kl
                 + sup_w.get("recon", 1.0) * (loss_recon_nll + loss_recon_kl)
             )
 
         metrics = {
-            "align_nll": loss_align_nll.detach(),
-            "align_kl": loss_align_kl.detach(),
             "reconstruction_nll": loss_recon_nll.detach(),
             "reconstruction_kl": loss_recon_kl.detach(),
             "supervised_contrastive": loss_sup.detach(),
@@ -385,10 +345,6 @@ class TwoStageTrainer:
                     sup_contrast=float(metrics_s.get("supervised_contrastive", 0.0)),
                 )
 
-        align_nll_sum = stats.get("unsup_align_nll", 0.0) + stats.get("sup_align_nll", 0.0)
-        align_nll_count = counts.get("unsup_align_nll", 0) + counts.get("sup_align_nll", 0)
-        align_kl_sum = stats.get("unsup_align_kl", 0.0) + stats.get("sup_align_kl", 0.0)
-        align_kl_count = counts.get("unsup_align_kl", 0) + counts.get("sup_align_kl", 0)
         recon_nll_sum = stats.get("unsup_reconstruction_nll", 0.0) + stats.get("sup_reconstruction_nll", 0.0)
         recon_nll_count = counts.get("unsup_reconstruction_nll", 0) + counts.get("sup_reconstruction_nll", 0)
         recon_kl_sum = stats.get("unsup_reconstruction_kl", 0.0) + stats.get("sup_reconstruction_kl", 0.0)
@@ -399,12 +355,6 @@ class TwoStageTrainer:
         sup_contrast_count = counts.get("sup_supervised_contrastive", 0)
 
         final_metrics: Dict[str, float] = {}
-        final_metrics["alignNLL_loss"] = (
-            align_nll_sum / align_nll_count if align_nll_count > 0 else 0.0
-        )
-        final_metrics["alignKL_loss"] = (
-            align_kl_sum / align_kl_count if align_kl_count > 0 else 0.0
-        )
         final_metrics["reconstructionNLL_loss"] = (
             recon_nll_sum / recon_nll_count if recon_nll_count > 0 else 0.0
         )

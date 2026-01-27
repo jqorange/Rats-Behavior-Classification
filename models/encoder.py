@@ -28,10 +28,6 @@ class Encoder(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.norm_tcn = nn.LayerNorm(d_model)
 
-        # GRU head for cross-modal prediction
-        self.head_cross = nn.GRU(d_model, d_model, batch_first=True)
-        self.norm_cross = nn.LayerNorm(d_model)
-
         # GRU based reconstruction head for the current modality
         self.head_recon = nn.GRU(d_model, d_model, batch_first=True)
         self.norm_recon = nn.LayerNorm(d_model)
@@ -46,7 +42,6 @@ class Encoder(nn.Module):
 
         Returns:
             z_self:  [B, T, D] - representation in *own* space
-            z_cross: [B, T, D] - representation predicted in *other* space
         """
         B, T, _ = x.shape
         check_nan(x, "input x")
@@ -70,14 +65,11 @@ class Encoder(nn.Module):
 
         # 4) Outputs
         z_self = h                                              # [B, T, D]
-        z_cross, _ = self.head_cross(h.detach())
-        z_cross = self.norm_cross(z_cross)                      # [B, T, D]
         recon_h, _ = self.head_recon(h)
         recon_h = self.norm_recon(recon_h)
         x_recon = self.recon_out(recon_h)
 
         check_nan(z_self, "z_self")
-        check_nan(z_cross, "z_cross")
         check_nan(x_recon, "x_recon")
 
-        return z_self, z_cross, x_recon
+        return z_self, x_recon
